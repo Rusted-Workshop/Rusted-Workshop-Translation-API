@@ -1,0 +1,12 @@
+[project]
+name = "rusted-workshop-translation-api"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "agno>=2.0.10",
+    "chardet>=5.2.0",
+    "openai>=1.109.1",
+    "pydantic>=2.11.9",
+]
