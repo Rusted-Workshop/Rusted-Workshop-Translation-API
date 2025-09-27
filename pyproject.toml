@@ -7,6 +7,8 @@ requires-python = ">=3.12"
 dependencies = [
     "agno>=2.0.10",
     "chardet>=5.2.0",
+    "kafka-python>=2.2.15",
     "openai>=1.109.1",
     "pydantic>=2.11.9",
+    "redis>=6.4.0",
 ]

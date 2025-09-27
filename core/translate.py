@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Type
 
@@ -6,6 +7,7 @@ from pydantic import BaseModel
 from core.agents.translate import create_agent
 from core.agents.translate_style_analysis import translate_style_analysis_agent
 from utlis.ini_lib import generate_model_from_dict, IniFile
+from utlis.redis_lib import get_db
 
 TEXT_KEYS_REGEX = re.compile(
     r"(?i)^(?:"
@@ -45,6 +47,9 @@ def translate_tasks(
     translate_style += f"\n\n目标语言: {target_language}"
     OutputSchema: Type[BaseModel] = generate_model_from_dict(tasks)
     response = create_agent(OutputSchema).run(translate_style)
+    if isinstance(response, str):
+        return OutputSchema.model_validate(json.loads(response))
+
     return response.content
 
 
@@ -52,7 +57,17 @@ def analysis_style(content: str) -> str:
     return translate_style_analysis_agent.run(content).content
 
 
-def translate_inifile(inifile: IniFile):
+def translate_inifile(
+    inifile: IniFile,
+    use_cache: bool = True,
+    translate_style: str = "",
+    mod_id: str = "",
+) -> IniFile:
+    redis = None
+    if use_cache:
+        redis = get_db()
+    translate_cache_key = f"translate_cache:{mod_id}"
+
     text_keys: list[tuple[str, str]] = []
 
     for section in inifile.data.keys():
@@ -64,25 +79,24 @@ def translate_inifile(inifile: IniFile):
         return inifile
 
     translate_tasks_case = {}
-    style_analysis_case = []
-
-    # 提取部分当作风格案例
-    for section, key in text_keys[:30]:
-        style_analysis_case.append(inifile.data[section][key])
 
     # 翻译任务
     for section, key in text_keys:
-        translate_tasks_case[f"{section}:{key}"] = inifile.data[section][key]
+        text = inifile.data[section][key]
+        if redis.hget(translate_cache_key, text):
+            translated_text = redis.hget(translate_cache_key, text).decode("utf-8")
+            inifile.data[section][key] = translated_text
+        else:
+            translate_tasks_case[text] = "translation Key"
 
-    style_analysis_case_text = "\n----------\n".join(style_analysis_case)[:500]
-
-    translate_style = analysis_style(style_analysis_case_text)
-
-    response = translate_tasks(translate_tasks_case, translate_style)
-
-    for key, value in response.model_dump().items():
-        section = key.split(":")[0]
-        key = key.split(":")[1]
-        inifile.data[section][key] = value
+    if translate_tasks_case:
+        response: BaseModel = translate_tasks(translate_tasks_case, translate_style)
+        print(response)
+        for original_text, translated_text in response.model_dump().items():
+            for section, key in text_keys:
+                if inifile.data[section][key] == original_text:
+                    inifile.data[section][key] = translated_text
+            if redis:
+                redis.hset(translate_cache_key, original_text, translated_text)
 
     return inifile

@@ -24,7 +24,6 @@ def generate_model_from_dict(
         return create_model(
             model_name,
             __base__=BaseModel,
-            __doc__="Key and Raw text",
             __module__=sys._getframe(1).f_globals["__name__"],
             **top_fields,
         )
