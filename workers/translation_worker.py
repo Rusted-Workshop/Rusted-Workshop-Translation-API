@@ -11,7 +11,7 @@ import traceback
 from pika.spec import Basic, BasicProperties
 
 from core.rwmod import RWMod
-from core.translate import translate_inifile, translate_inifiles_batch
+from core.translate import translate_inifiles_batch
 from models.task import TaskStatus
 from services.cache_service import TranslationCache
 from services.rabbitmq_service import get_rabbitmq_service
@@ -216,6 +216,7 @@ class TranslationWorker:
                         batch_files,
                         translate_style=style,
                         mod_id=task_id,
+                        target_language=target_language,
                         batch_size=batch_size,
                         cache_dict=cache_dict,
                     )

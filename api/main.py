@@ -119,6 +119,7 @@ async def run_task(request: TaskRunRequest):
     运行翻译任务
 
     在用户上传文件后，调用此接口启动翻译任务。
+    如果任务状态为 FAILED，会重置任务状态并重新运行。
     """
     # 获取任务
     task = await task_manager.get_task(request.task_id)
@@ -126,7 +127,18 @@ async def run_task(request: TaskRunRequest):
         raise HTTPException(status_code=404, detail="Task not found")
 
     # 检查任务状态
-    if task.status != TaskStatus.PENDING:
+    if task.status == TaskStatus.FAILED:
+        # 失败的任务可以重试，重置状态
+        await task_manager.update_task(
+            request.task_id,
+            status=TaskStatus.PENDING,
+            progress=0.0,
+            error_message=None,
+            current_file=None,
+            processed_files=0,
+        )
+        task = await task_manager.get_task(request.task_id)
+    elif task.status != TaskStatus.PENDING:
         raise HTTPException(
             status_code=400,
             detail=f"Task is already {task.status.value}, cannot run again",

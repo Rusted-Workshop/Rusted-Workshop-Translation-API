@@ -6,38 +6,54 @@ from core.agents.translate import create_agent
 from core.agents.translate_style_analysis import translate_style_analysis_agent
 from utlis.ini_lib import IniFile, generate_model_from_dict
 
-TEXT_KEYS_REGEX = re.compile(
+# 基础文本键的正则（不包含语言后缀）
+BASE_TEXT_KEYS_REGEX = re.compile(
     r"(?i)^(?:"
     r"description|"
-    r"description_[a-z]+|"
     r"title|"
-    r"title_[a-z]+|"
     r"displaydescription|"
-    r"displayDescription_[a-z]+|"
     r"text|"
-    r"text_[a-z]+|"
     r"displayText|"
-    r"displayText_[a-z]+|"
     r"isLockedAltMessage|"
-    r"isLockedAltMessage_[a-z]+|"
     r"cannotPlaceMessage|"
-    r"cannotPlaceMessage_[a-z]+|"
     r"displayName|"
-    r"displayName_[a-z]+|"
     r"displayNameShort|"
-    r"displayNameShort_[a-z]+|"
     r"showMessageToPlayer|"
-    r"showMessageToPlayer_[a-z]+|"
     r"showMessageToAllPlayers|"
+    r"action_\d+_(?:text|displayName)"
+    r")$",
+    re.IGNORECASE,
+)
+
+# 带语言后缀的文本键正则
+LOCALIZED_TEXT_KEYS_REGEX = re.compile(
+    r"(?i)^(?:"
+    r"description_[a-z]+|"
+    r"title_[a-z]+|"
+    r"displaydescription_[a-z]+|"
+    r"displayDescription_[a-z]+|"
+    r"text_[a-z]+|"
+    r"displayText_[a-z]+|"
+    r"isLockedAltMessage_[a-z]+|"
+    r"cannotPlaceMessage_[a-z]+|"
+    r"displayName_[a-z]+|"
+    r"displayNameShort_[a-z]+|"
+    r"showMessageToPlayer_[a-z]+|"
     r"showMessageToAllPlayers_[a-z]+|"
-    r"action_\d+_(?:text|displayName)(?:_[a-z]+)?"
+    r"action_\d+_(?:text|displayName)_[a-z]+"
     r")$",
     re.IGNORECASE,
 )
 
 
 def is_text_key_valid(key: str) -> bool:
-    return TEXT_KEYS_REGEX.match(key) is not None
+    """检查是否为有效的基础文本键（不包含语言后缀）"""
+    return BASE_TEXT_KEYS_REGEX.match(key) is not None
+
+
+def is_localized_text_key(key: str) -> bool:
+    """检查是否为带语言后缀的文本键"""
+    return LOCALIZED_TEXT_KEYS_REGEX.match(key) is not None
 
 
 async def translate_tasks(
@@ -149,6 +165,7 @@ async def translate_inifiles_batch(
     inifiles: list[IniFile],
     translate_style: str = "",
     mod_id: str = "",
+    target_language: str = "中文",
     batch_size: int = 10,
     cache_dict: dict[str, str] | None = None,
 ) -> list[IniFile]:
@@ -159,6 +176,7 @@ async def translate_inifiles_batch(
         inifiles: INI文件对象列表
         translate_style: 翻译风格
         mod_id: 模组ID
+        target_language: 目标语言
         batch_size: 批量大小，每次翻译多少个文件
         cache_dict: 缓存字典，用于跨文件的缓存查询和更新
 
@@ -168,7 +186,27 @@ async def translate_inifiles_batch(
     if cache_dict is None:
         cache_dict = {}
 
-    # 第一步：收集所有需要翻译的文本
+    # 第一步：预处理 - 如果基础键为空，从其他语言版本复制
+    for inifile in inifiles:
+        for section in inifile.data.keys():
+            keys_to_check = list(inifile.data[section].keys())
+
+            for key in keys_to_check:
+                if is_text_key_valid(key):
+                    # 基础键
+                    base_value = inifile.data[section].get(key, "").strip()
+
+                    # 如果基础键为空，尝试从其他语言版本获取
+                    if not base_value:
+                        # 查找所有可能的语言后缀版本
+                        for localized_key in keys_to_check:
+                            if localized_key.lower().startswith(key.lower() + "_"):
+                                localized_value = inifile.data[section].get(localized_key, "").strip()
+                                if localized_value:
+                                    inifile.data[section][key] = localized_value
+                                    break
+
+    # 第二步：收集所有需要翻译的文本
     all_translate_tasks = {}
     file_text_keys: list[tuple[int, list[tuple[str, str]]]] = []
 
@@ -186,11 +224,11 @@ async def translate_inifiles_batch(
         for section, key in text_keys:
             text: str = inifile.data[section][key]
 
-            # 跳过已缓存的文本
-            if text not in cache_dict:
+            # 跳过空文本和已缓存的文本
+            if text and text not in cache_dict:
                 all_translate_tasks[text] = "translation Key"
 
-    # 第二步：批量翻译所有新文本
+    # 第三步：批量翻译所有新文本
     if all_translate_tasks:
         # 将任务分批处理
         tasks_items = list(all_translate_tasks.items())
@@ -199,13 +237,13 @@ async def translate_inifiles_batch(
             batch_tasks = dict(tasks_items[i:i + batch_size])
 
             response: dict[str, str] = await translate_tasks(
-                batch_tasks, translate_style
+                batch_tasks, translate_style, target_language
             )
 
             # 更新缓存字典
             cache_dict.update(response)
 
-    # 第三步：应用翻译结果到所有文件
+    # 第四步：应用翻译结果到所有文件
     for file_idx, text_keys in file_text_keys:
         inifile = inifiles[file_idx]
 
@@ -213,5 +251,18 @@ async def translate_inifiles_batch(
             original_text = inifile.data[section][key]
             if original_text in cache_dict:
                 inifile.data[section][key] = cache_dict[original_text]
+
+    # 第五步：删除所有带语言后缀的键
+    for inifile in inifiles:
+        for section in inifile.data.keys():
+            keys_to_delete = []
+
+            for key in inifile.data[section]:
+                if is_localized_text_key(key):
+                    keys_to_delete.append(key)
+
+            # 删除这些键
+            for key in keys_to_delete:
+                del inifile.data[section][key]
 
     return inifiles
