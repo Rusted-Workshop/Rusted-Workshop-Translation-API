@@ -54,6 +54,7 @@ def read_file(file_path) -> str:
     """
     自动检测文件编码并读取内容
     """
+    raw_data = b""
     try:
         # 1. 读取文件的原始字节数据
         with open(file_path, "rb") as file:

@@ -35,7 +35,6 @@ class RWMod:
             self.unit_datas.append(mod_info)
 
     async def analysis_style(self, use_cache: bool = True) -> str:
-    
         print(f"[{self.uuid}] 分析风格信息")
         text_keys: list[tuple[IniFile, str, str]] = []
         max_case_length = 30
@@ -63,4 +62,6 @@ class RWMod:
 
     async def translate_all(self):
         for inifile in self.unit_datas:
-            await translate_inifile(inifile, translate_style=self.style, mod_id=self.uuid)
+            await translate_inifile(
+                inifile, translate_style=self.style, mod_id=self.uuid
+            )

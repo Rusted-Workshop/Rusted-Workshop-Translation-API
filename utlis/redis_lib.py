@@ -9,14 +9,13 @@ from utlis.config import (
 )
 
 
-async def get_db() -> Redis:
-    if REDIS_HOST is None or REDIS_PORT is None or REDIS_DB is None:
-        raise ValueError("Redis config is not set.")
-
-    return await Redis(
+def get_redis_connection() -> Redis:
+    """获取 Redis 异步连接"""
+    return Redis(
         host=REDIS_HOST,
         port=int(REDIS_PORT),
         db=int(REDIS_DB),
-        username=REDIS_USERNAME,
-        password=REDIS_PASSWORD,
+        username=REDIS_USERNAME if REDIS_USERNAME else None,
+        password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+        decode_responses=True,
     )
