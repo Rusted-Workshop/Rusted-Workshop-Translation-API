@@ -11,7 +11,7 @@ import traceback
 from pika.spec import Basic, BasicProperties
 
 from core.rwmod import RWMod
-from core.translate import translate_inifile
+from core.translate import translate_inifile, translate_inifiles_batch
 from models.task import TaskStatus
 from services.cache_service import TranslationCache
 from services.rabbitmq_service import get_rabbitmq_service
@@ -30,6 +30,7 @@ class TranslationWorker:
         self.task_manager = TaskManager()
         self.s3_service = S3Service()
         self.cache_service = TranslationCache()
+        self._event_loop = None
 
     def start(self):
         """启动 Worker"""
@@ -49,7 +50,11 @@ class TranslationWorker:
         body: bytes,
     ):
         """处理消息"""
+        import asyncio
+
         message: dict = {}
+        task_id = None
+
         try:
             message = json.loads(body)
             task_id = message["task_id"]
@@ -70,16 +75,24 @@ class TranslationWorker:
             self.rabbitmq.nack_message(method.delivery_tag, requeue=False)
 
             # 更新任务状态为失败
-            if message and "task_id" in message:
-                import asyncio
-
-                asyncio.run(
-                    self.task_manager.update_task(
-                        message["task_id"],
-                        status=TaskStatus.FAILED,
-                        error_message=str(e),
-                    )
-                )
+            if task_id:
+                try:
+                    # 创建新的事件循环来更新任务状态
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(
+                            self.task_manager.update_task(
+                                task_id,
+                                status=TaskStatus.FAILED,
+                                error_message=str(e),
+                            )
+                        )
+                    finally:
+                        loop.close()
+                except Exception as update_error:
+                    print(f"更新任务状态失败: {update_error}")
+                    traceback.print_exc()
 
     def _process_translation_task(self, message: dict):
         """
@@ -94,7 +107,7 @@ class TranslationWorker:
 
     async def _process_translation_task_async(self, message: dict):
         """
-        处理翻译任务（异步）
+        处理翻译任务
 
         Args:
             message: 任务消息
@@ -116,7 +129,15 @@ class TranslationWorker:
             )
 
             archive_path = os.path.join(work_dir, "source.rwmod")
-            await self.s3_service.download_file(s3_source_url, archive_path)
+            try:
+                await self.s3_service.download_file(s3_source_url, archive_path)
+            except Exception as e:
+                error_msg = f"下载文件失败: {str(e)}"
+                print(f"[{task_id}] {error_msg}")
+                await self.task_manager.update_task(
+                    task_id, status=TaskStatus.FAILED, error_message=error_msg
+                )
+                raise
 
             # 2. 解压文件
             print(f"[{task_id}] 解压文件")
@@ -125,7 +146,15 @@ class TranslationWorker:
             )
 
             extract_dir = os.path.join(work_dir, "extracted")
-            extract_archive(archive_path, extract_dir)
+            try:
+                extract_archive(archive_path, extract_dir)
+            except Exception as e:
+                error_msg = f"解压文件失败: {str(e)}"
+                print(f"[{task_id}] {error_msg}")
+                await self.task_manager.update_task(
+                    task_id, status=TaskStatus.FAILED, error_message=error_msg
+                )
+                raise
 
             # 3. 分析和翻译
             print(f"[{task_id}] 分析模组")
@@ -133,12 +162,20 @@ class TranslationWorker:
                 task_id, status=TaskStatus.ANALYZING, progress=30.0
             )
 
-            rwmod = RWMod(extract_dir)
+            try:
+                rwmod = RWMod(extract_dir)
 
-            # 分析风格
-            print(f"[{task_id}] 分析风格")
-            style = await rwmod.analysis_style()
-            rwmod.style = style
+                # 分析风格
+                print(f"[{task_id}] 分析风格")
+                style = await rwmod.analysis_style()
+                rwmod.style = style
+            except Exception as e:
+                error_msg = f"分析模组失败: {str(e)}"
+                print(f"[{task_id}] {error_msg}")
+                await self.task_manager.update_task(
+                    task_id, status=TaskStatus.FAILED, error_message=error_msg
+                )
+                raise
 
             # 4. 翻译所有文件
             print(f"[{task_id}] 开始翻译")
@@ -149,28 +186,82 @@ class TranslationWorker:
                 total_files=len(rwmod.unit_datas),
             )
 
-            for idx, inifile in enumerate(rwmod.unit_datas):
-                file_name = os.path.basename(inifile.path)
-                print(
-                    f"[{task_id}] 翻译文件: {file_name} ({idx + 1}/{len(rwmod.unit_datas)})"
-                )
+            try:
+                # 批量翻译文件，每批10个
+                batch_size = 10
+                total_files = len(rwmod.unit_datas)
+                cache_dict: dict[str, str] = {}
 
-                # 使用缓存
-                translated_inifile = await self._translate_with_cache(
-                    inifile, style, task_id, target_language
-                )
+                # 先加载所有可用的缓存
+                print(f"[{task_id}] 加载翻译缓存")
+                for inifile in rwmod.unit_datas:
+                    file_content = self._inifile_to_string(inifile)
+                    cached_translations = await self.cache_service.get_cached_translation(
+                        inifile.path, file_content
+                    )
+                    if cached_translations:
+                        cache_dict.update(cached_translations)
 
-                # 保存翻译结果
-                self._save_inifile(translated_inifile)
+                # 分批处理文件
+                for batch_start in range(0, total_files, batch_size):
+                    batch_end = min(batch_start + batch_size, total_files)
+                    batch_files = rwmod.unit_datas[batch_start:batch_end]
 
-                # 更新进度
-                progress = 40.0 + (50.0 * (idx + 1) / len(rwmod.unit_datas))
+                    print(
+                        f"[{task_id}] 翻译文件批次 {batch_start + 1}-{batch_end}/{total_files}"
+                    )
+
+                    # 批量翻译
+                    translated_files = await translate_inifiles_batch(
+                        batch_files,
+                        translate_style=style,
+                        mod_id=task_id,
+                        batch_size=batch_size,
+                        cache_dict=cache_dict,
+                    )
+
+                    # 保存翻译结果并更新缓存
+                    for idx, translated_inifile in enumerate(translated_files):
+                        file_name = os.path.basename(translated_inifile.path)
+
+                        # 保存文件
+                        self._save_inifile(translated_inifile)
+
+                        # 更新缓存 - 保存新翻译的内容
+                        original_inifile = batch_files[idx]
+                        translations = {}
+                        for section in original_inifile.data.keys():
+                            for key in original_inifile.data[section]:
+                                original_text = original_inifile.data[section][key]
+                                translated_text = translated_inifile.data[section][key]
+                                if original_text != translated_text:
+                                    translations[original_text] = translated_text
+
+                        if translations:
+                            file_content = self._inifile_to_string(original_inifile)
+                            await self.cache_service.save_translation(
+                                original_inifile.path, file_content, translations
+                            )
+
+                        # 更新进度
+                        current_file_num = batch_start + idx + 1
+                        progress = 40.0 + (50.0 * current_file_num / total_files)
+                        await self.task_manager.update_task(
+                            task_id,
+                            progress=progress,
+                            current_file=file_name,
+                            processed_files=current_file_num,
+                        )
+
+                print(f"[{task_id}] 翻译完成，共处理 {total_files} 个文件")
+
+            except Exception as e:
+                error_msg = f"翻译文件失败: {str(e)}"
+                print(f"[{task_id}] {error_msg}")
                 await self.task_manager.update_task(
-                    task_id,
-                    progress=progress,
-                    current_file=file_name,
-                    processed_files=idx + 1,
+                    task_id, status=TaskStatus.FAILED, error_message=error_msg
                 )
+                raise
 
             # 5. 打包
             print(f"[{task_id}] 打包文件")
@@ -178,8 +269,16 @@ class TranslationWorker:
                 task_id, status=TaskStatus.MERGING, progress=90.0
             )
 
-            output_archive = os.path.join(work_dir, "translated.rwmod")
-            create_archive(extract_dir, output_archive, format="zip")
+            try:
+                output_archive = os.path.join(work_dir, "translated.rwmod")
+                create_archive(extract_dir, output_archive, format="zip")
+            except Exception as e:
+                error_msg = f"打包文件失败: {str(e)}"
+                print(f"[{task_id}] {error_msg}")
+                await self.task_manager.update_task(
+                    task_id, status=TaskStatus.FAILED, error_message=error_msg
+                )
+                raise
 
             # 6. 上传到S3
             print(f"[{task_id}] 上传到 S3")
@@ -187,9 +286,17 @@ class TranslationWorker:
                 task_id, status=TaskStatus.UPLOADING, progress=95.0
             )
 
-            s3_url = await self.s3_service.upload_file(
-                output_archive, s3_dest_bucket, s3_dest_key
-            )
+            try:
+                s3_url = await self.s3_service.upload_file(
+                    output_archive, s3_dest_bucket, s3_dest_key
+                )
+            except Exception as e:
+                error_msg = f"上传到S3失败: {str(e)}"
+                print(f"[{task_id}] {error_msg}")
+                await self.task_manager.update_task(
+                    task_id, status=TaskStatus.FAILED, error_message=error_msg
+                )
+                raise
 
             # 7. 完成
             print(f"[{task_id}] 任务完成: {s3_url}")
@@ -197,67 +304,14 @@ class TranslationWorker:
                 task_id, status=TaskStatus.COMPLETED, progress=100.0
             )
 
+        except Exception:
+            # 所有异常都已在上面处理并更新了任务状态，这里只需重新抛出
+            raise
         finally:
             # 清理临时文件
             if os.path.exists(work_dir):
                 shutil.rmtree(work_dir)
                 print(f"[{task_id}] 清理临时文件")
-
-    async def _translate_with_cache(
-        self,
-        inifile: IniFile,
-        style: str,
-        mod_id: str,
-        target_language: str = "中文",
-    ) -> IniFile:
-        """
-        使用缓存进行翻译
-
-        Args:
-            inifile: INI文件对象
-            style: 翻译风格
-            mod_id: 模组ID
-            target_language: 目标语言
-
-        Returns:
-            翻译后的INI文件对象
-        """
-        # 尝试从缓存获取
-        file_content = self._inifile_to_string(inifile)
-        cached_translations = await self.cache_service.get_cached_translation(
-            inifile.path, file_content
-        )
-
-        if cached_translations:
-            print(f"  使用缓存翻译: {os.path.basename(inifile.path)}")
-            # 应用缓存的翻译
-            for section in inifile.data.keys():
-                for key in inifile.data[section]:
-                    original_text = inifile.data[section][key]
-                    if original_text in cached_translations:
-                        inifile.data[section][key] = cached_translations[original_text]
-            return inifile
-
-        # 执行翻译
-        translated_inifile = await translate_inifile(
-            inifile, translate_style=style, mod_id=mod_id
-        )
-
-        # 保存到缓存
-        translations = {}
-        for section in inifile.data.keys():
-            for key in inifile.data[section]:
-                original_text = inifile.data[section][key]
-                translated_text = translated_inifile.data[section][key]
-                if original_text != translated_text:
-                    translations[original_text] = translated_text
-
-        if translations:
-            await self.cache_service.save_translation(
-                inifile.path, file_content, translations
-            )
-
-        return translated_inifile
 
     def _inifile_to_string(self, inifile: IniFile) -> str:
         """将INI文件对象转换为字符串"""

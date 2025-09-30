@@ -8,9 +8,26 @@ from typing import List
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from models.task import TaskCreateRequest, TaskResponse, TaskStatus, TranslationTask
+from models.task import (
+    TaskCreateRequest,
+    TaskCreateResponse,
+    TaskResponse,
+    TaskRunRequest,
+    TaskStatus,
+    TranslationTask,
+)
 from services.rabbitmq_service import get_rabbitmq_service
+from services.s3_service import S3Service
 from services.task_manager import TaskManager
+from utlis.config import (
+    AWS_ACCESS_KEY_ID,
+    AWS_ENDPOINT_URL,
+    AWS_REGION,
+    AWS_SECRET_ACCESS_KEY,
+    S3_BUCKET,
+    S3_OUTPUT_PREFIX,
+    S3_UPLOAD_PREFIX,
+)
 
 app = FastAPI(
     title="Rusted Workshop Translation API",
@@ -28,6 +45,12 @@ app.add_middleware(
 )
 
 task_manager = TaskManager()
+s3_service = S3Service(
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION,
+    endpoint_url=AWS_ENDPOINT_URL,
+)
 
 
 @app.get("/")
@@ -36,28 +59,78 @@ def read_root():
     return {"status": "ok", "service": "Translation API"}
 
 
-@app.post("/tasks", response_model=TaskResponse, status_code=201)
+@app.post("/tasks", response_model=TaskCreateResponse, status_code=201)
 async def create_task(request: TaskCreateRequest):
     """
     创建翻译任务
 
-    提交一个新的翻译任务到队列
+    生成任务ID和预签名上传URL，用户需要先上传文件到返回的URL，然后调用 /tasks/run 启动任务。
+
+    工作流程：
+    1. 调用此接口创建任务，获取 task_id 和 upload_url
+    2. 使用 HTTP PUT 方法上传文件到 upload_url
+    3. 调用 POST /tasks/run 启动翻译任务
     """
     # 生成任务ID
     task_id = str(uuid.uuid4())
 
-    # 创建任务
+    # 生成S3路径
+    s3_source_key = f"{S3_UPLOAD_PREFIX}/{task_id}/source.rwmod"
+    s3_dest_key = f"{S3_OUTPUT_PREFIX}/{task_id}/translated.rwmod"
+
+    # 生成预签名上传URL
+    try:
+        upload_url = s3_service.generate_presigned_upload_url(
+            bucket=S3_BUCKET,
+            key=s3_source_key,
+            expiration=3600,
+            content_type="application/zip",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate upload URL: {str(e)}"
+        )
+
+    # 创建任务（但不启动）
+    s3_source_url = f"s3://{S3_BUCKET}/{s3_source_key}"
     task = TranslationTask(
         task_id=task_id,
-        s3_source_url=request.s3_source_url,
-        s3_dest_bucket=request.s3_dest_bucket,
-        s3_dest_key=request.s3_dest_key,
+        s3_source_url=s3_source_url,
+        s3_dest_bucket=S3_BUCKET,
+        s3_dest_key=s3_dest_key,
         target_language=request.target_language,
         status=TaskStatus.PENDING,
     )
 
     # 保存任务状态
     await task_manager.create_task(task)
+
+    return TaskCreateResponse(
+        task_id=task_id,
+        upload_url=upload_url,
+        expires_in=3600,
+        target_language=request.target_language,
+    )
+
+
+@app.post("/tasks/run", response_model=TaskResponse)
+async def run_task(request: TaskRunRequest):
+    """
+    运行翻译任务
+
+    在用户上传文件后，调用此接口启动翻译任务。
+    """
+    # 获取任务
+    task = await task_manager.get_task(request.task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # 检查任务状态
+    if task.status != TaskStatus.PENDING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task is already {task.status.value}, cannot run again",
+        )
 
     # 发送消息到 RabbitMQ
     try:
@@ -67,17 +140,15 @@ async def create_task(request: TaskCreateRequest):
         rabbitmq.publish_message(
             "translation_tasks",
             {
-                "task_id": task_id,
-                "s3_source_url": request.s3_source_url,
-                "s3_dest_bucket": request.s3_dest_bucket,
-                "s3_dest_key": request.s3_dest_key,
-                "target_language": request.target_language,
+                "task_id": task.task_id,
+                "s3_source_url": task.s3_source_url,
+                "s3_dest_bucket": task.s3_dest_bucket,
+                "s3_dest_key": task.s3_dest_key,
+                "target_language": task.target_language,
             },
         )
         rabbitmq.close()
     except Exception as e:
-        # 如果发送失败，删除任务
-        await task_manager.delete_task(task_id)
         raise HTTPException(status_code=500, detail=f"Failed to queue task: {str(e)}")
 
     return TaskResponse(
@@ -88,6 +159,7 @@ async def create_task(request: TaskCreateRequest):
         total_files=task.total_files,
         processed_files=task.processed_files,
         error_message=task.error_message,
+        download_url=None,
         created_at=task.created_at,
         updated_at=task.updated_at,
         completed_at=task.completed_at,
@@ -106,6 +178,18 @@ async def get_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    # 如果任务已完成，生成下载链接
+    download_url = None
+    if task.status == TaskStatus.COMPLETED:
+        try:
+            download_url = s3_service.generate_presigned_download_url(
+                bucket=task.s3_dest_bucket,
+                key=task.s3_dest_key,
+                expiration=3600,
+            )
+        except Exception as e:
+            print(f"Failed to generate download URL: {e}")
+
     return TaskResponse(
         task_id=task.task_id,
         status=task.status,
@@ -114,6 +198,7 @@ async def get_task(task_id: str):
         total_files=task.total_files,
         processed_files=task.processed_files,
         error_message=task.error_message,
+        download_url=download_url,
         created_at=task.created_at,
         updated_at=task.updated_at,
         completed_at=task.completed_at,
@@ -132,21 +217,37 @@ async def list_tasks(
     """
     tasks = await task_manager.list_tasks(limit=limit, offset=offset)
 
-    return [
-        TaskResponse(
-            task_id=task.task_id,
-            status=task.status,
-            progress=task.progress,
-            current_file=task.current_file,
-            total_files=task.total_files,
-            processed_files=task.processed_files,
-            error_message=task.error_message,
-            created_at=task.created_at,
-            updated_at=task.updated_at,
-            completed_at=task.completed_at,
+    result = []
+    for task in tasks:
+        # 如果任务已完成，生成下载链接
+        download_url = None
+        if task.status == TaskStatus.COMPLETED:
+            try:
+                download_url = s3_service.generate_presigned_download_url(
+                    bucket=task.s3_dest_bucket,
+                    key=task.s3_dest_key,
+                    expiration=3600,
+                )
+            except Exception as e:
+                print(f"Failed to generate download URL for task {task.task_id}: {e}")
+
+        result.append(
+            TaskResponse(
+                task_id=task.task_id,
+                status=task.status,
+                progress=task.progress,
+                current_file=task.current_file,
+                total_files=task.total_files,
+                processed_files=task.processed_files,
+                error_message=task.error_message,
+                download_url=download_url,
+                created_at=task.created_at,
+                updated_at=task.updated_at,
+                completed_at=task.completed_at,
+            )
         )
-        for task in tasks
-    ]
+
+    return result
 
 
 @app.delete("/tasks/{task_id}", status_code=204)

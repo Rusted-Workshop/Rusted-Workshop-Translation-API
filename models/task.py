@@ -45,10 +45,22 @@ class TranslationTask(BaseModel):
 class TaskCreateRequest(BaseModel):
     """创建任务请求"""
 
-    s3_source_url: str = Field(..., description="S3源文件URL")
-    s3_dest_bucket: str = Field(..., description="S3目标存储桶")
-    s3_dest_key: str = Field(..., description="S3目标文件键")
     target_language: str = Field(default="中文", description="目标语言")
+
+
+class TaskCreateResponse(BaseModel):
+    """创建任务响应"""
+
+    task_id: str = Field(..., description="任务ID")
+    upload_url: str = Field(..., description="预签名上传URL，用于上传源文件")
+    expires_in: int = Field(..., description="上传URL过期时间（秒）")
+    target_language: str = Field(..., description="目标语言")
+
+
+class TaskRunRequest(BaseModel):
+    """运行任务请求"""
+
+    task_id: str = Field(..., description="任务ID")
 
 
 class TaskResponse(BaseModel):
@@ -61,6 +73,7 @@ class TaskResponse(BaseModel):
     total_files: int = 0
     processed_files: int = 0
     error_message: Optional[str] = None
+    download_url: Optional[str] = Field(default=None, description="下载链接（任务完成后可用）")
     created_at: datetime
     updated_at: datetime
     completed_at: Optional[datetime] = None

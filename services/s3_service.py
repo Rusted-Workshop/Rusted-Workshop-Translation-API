@@ -7,7 +7,9 @@ import zipfile
 from typing import Optional
 
 import aioboto3
+import boto3
 from botocore.exceptions import ClientError
+from botocore.client import Config
 
 
 class S3Service:
@@ -27,6 +29,11 @@ class S3Service:
             region_name=region_name,
         )
         self.endpoint_url = endpoint_url
+        self.aws_access_key_id = aws_access_key_id or os.getenv("AWS_ACCESS_KEY_ID")
+        self.aws_secret_access_key = aws_secret_access_key or os.getenv(
+            "AWS_SECRET_ACCESS_KEY"
+        )
+        self.region_name = region_name
 
     async def download_file(self, s3_url: str, local_path: str) -> str:
         """
@@ -88,6 +95,97 @@ class S3Service:
                 await self.upload_file(local_path, bucket, s3_key)
 
         return f"s3://{bucket}/{prefix}"
+
+    def generate_presigned_upload_url(
+        self,
+        bucket: str,
+        key: str,
+        expiration: int = 3600,
+        content_type: Optional[str] = None,
+    ) -> str:
+        """
+        生成预签名上传URL
+
+        Args:
+            bucket: S3存储桶名称
+            key: S3对象键
+            expiration: URL过期时间（秒），默认3600秒（1小时）
+            content_type: 可选的内容类型，例如 'application/zip'
+
+        Returns:
+            预签名上传URL
+        """
+        try:
+            s3_client = boto3.client(
+                "s3",
+                aws_access_key_id=self.aws_access_key_id,
+                aws_secret_access_key=self.aws_secret_access_key,
+                region_name=self.region_name,
+                endpoint_url=self.endpoint_url,
+                config=Config(
+                    signature_version="s3v4"
+                ),
+            )
+
+            params = {
+                "Bucket": bucket,
+                "Key": key
+            }
+
+            if content_type:
+                params["ContentType"] = content_type
+
+            presigned_url = s3_client.generate_presigned_url(
+                "put_object",
+                Params=params,
+                ExpiresIn=expiration,
+            )
+
+            return presigned_url
+        except ClientError as e:
+            raise Exception(f"Failed to generate presigned URL: {e}")
+
+    def generate_presigned_download_url(
+        self,
+        bucket: str,
+        key: str,
+        expiration: int = 3600,
+    ) -> str:
+        """
+        生成预签名下载URL
+
+        Args:
+            bucket: S3存储桶名称
+            key: S3对象键
+            expiration: URL过期时间（秒），默认3600秒（1小时）
+
+        Returns:
+            预签名下载URL
+        """
+        try:
+            s3_client = boto3.client(
+                "s3",
+                aws_access_key_id=self.aws_access_key_id,
+                aws_secret_access_key=self.aws_secret_access_key,
+                region_name=self.region_name,
+                endpoint_url=self.endpoint_url,
+                config=Config(
+                    signature_version="s3v4"
+                ),
+            )
+
+            presigned_url = s3_client.generate_presigned_url(
+                "get_object",
+                Params={
+                    "Bucket": bucket,
+                    "Key": key,
+                },
+                ExpiresIn=expiration,
+            )
+
+            return presigned_url
+        except ClientError as e:
+            raise Exception(f"Failed to generate presigned download URL: {e}")
 
     def _parse_s3_url(self, s3_url: str) -> tuple[str, str]:
         """

@@ -24,6 +24,8 @@ TEXT_KEYS_REGEX = re.compile(
     r"cannotPlaceMessage_[a-z]+|"
     r"displayName|"
     r"displayName_[a-z]+|"
+    r"displayNameShort|"
+    r"displayNameShort_[a-z]+|"
     r"showMessageToPlayer|"
     r"showMessageToPlayer_[a-z]+|"
     r"showMessageToAllPlayers|"
@@ -87,11 +89,21 @@ async def translate_inifile(
     use_cache: bool = True,
     translate_style: str = "",
     mod_id: str = "",
+    cache_dict: dict[str, str] | None = None,
 ) -> IniFile:
-    redis = None
+    """
+    翻译单个ini文件
 
-    translate_cache_key = f"translate_cache:{mod_id}"
+    Args:
+        inifile: INI文件对象
+        use_cache: 是否使用缓存
+        translate_style: 翻译风格
+        mod_id: 模组ID
+        cache_dict: 缓存字典，用于批量翻译时的缓存查询
 
+    Returns:
+        翻译后的INI文件对象
+    """
     text_keys: list[tuple[str, str]] = []
 
     for section in inifile.data.keys():
@@ -104,22 +116,102 @@ async def translate_inifile(
 
     translate_tasks_case = {}
 
-    # 翻译任务
+    # 收集需要翻译的文本，优先使用缓存
     for section, key in text_keys:
         text: str = inifile.data[section][key]
 
-        translate_tasks_case[text] = "translation Key"
+        # 如果提供了缓存字典，先查缓存
+        if use_cache and cache_dict and text in cache_dict:
+            inifile.data[section][key] = cache_dict[text]
+        else:
+            translate_tasks_case[text] = "translation Key"
 
+    # 如果有需要翻译的文本
     if translate_tasks_case:
         response: dict[str, str] = await translate_tasks(
             translate_tasks_case, translate_style
         )
 
+        # 应用翻译结果
         for original_text, translated_text in response.items():
             for section, key in text_keys:
                 if inifile.data[section][key] == original_text:
                     inifile.data[section][key] = translated_text
-            if redis:
-                redis.hset(translate_cache_key, original_text, translated_text)
+
+            # 更新缓存字典
+            if cache_dict is not None:
+                cache_dict[original_text] = translated_text
 
     return inifile
+
+
+async def translate_inifiles_batch(
+    inifiles: list[IniFile],
+    translate_style: str = "",
+    mod_id: str = "",
+    batch_size: int = 10,
+    cache_dict: dict[str, str] | None = None,
+) -> list[IniFile]:
+    """
+    批量翻译多个ini文件
+
+    Args:
+        inifiles: INI文件对象列表
+        translate_style: 翻译风格
+        mod_id: 模组ID
+        batch_size: 批量大小，每次翻译多少个文件
+        cache_dict: 缓存字典，用于跨文件的缓存查询和更新
+
+    Returns:
+        翻译后的INI文件对象列表
+    """
+    if cache_dict is None:
+        cache_dict = {}
+
+    # 第一步：收集所有需要翻译的文本
+    all_translate_tasks = {}
+    file_text_keys: list[tuple[int, list[tuple[str, str]]]] = []
+
+    for file_idx, inifile in enumerate(inifiles):
+        text_keys: list[tuple[str, str]] = []
+
+        for section in inifile.data.keys():
+            for key in inifile.data[section]:
+                if is_text_key_valid(key):
+                    text_keys.append((section, key))
+
+        file_text_keys.append((file_idx, text_keys))
+
+        # 收集需要翻译的文本
+        for section, key in text_keys:
+            text: str = inifile.data[section][key]
+
+            # 跳过已缓存的文本
+            if text not in cache_dict:
+                all_translate_tasks[text] = "translation Key"
+
+    # 第二步：批量翻译所有新文本
+    if all_translate_tasks:
+        # 将任务分批处理
+        tasks_items = list(all_translate_tasks.items())
+
+        for i in range(0, len(tasks_items), batch_size):
+            batch_tasks = dict(tasks_items[i:i + batch_size])
+
+            response: dict[str, str] = await translate_tasks(
+                batch_tasks, translate_style
+            )
+
+            # 更新缓存字典
+            cache_dict.update(response)
+
+    # 第三步：应用翻译结果到所有文件
+    for file_idx, text_keys in file_text_keys:
+        inifile = inifiles[file_idx]
+
+        for section, key in text_keys:
+            original_text = inifile.data[section][key]
+            if original_text in cache_dict:
+                inifile.data[section][key] = cache_dict[original_text]
+
+    return inifiles
