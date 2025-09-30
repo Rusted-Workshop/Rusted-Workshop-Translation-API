@@ -73,7 +73,9 @@ class TaskResponse(BaseModel):
     total_files: int = 0
     processed_files: int = 0
     error_message: Optional[str] = None
-    download_url: Optional[str] = Field(default=None, description="下载链接（任务完成后可用）")
+    download_url: Optional[str] = Field(
+        default=None, description="下载链接（任务完成后可用）"
+    )
     created_at: datetime
     updated_at: datetime
     completed_at: Optional[datetime] = None

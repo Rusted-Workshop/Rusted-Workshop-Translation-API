@@ -11,7 +11,7 @@ import traceback
 from pika.spec import Basic, BasicProperties
 
 from core.rwmod import RWMod
-from core.translate import translate_inifiles_batch
+from core.translate import translate_inifile
 from models.task import TaskStatus
 from services.cache_service import TranslationCache
 from services.rabbitmq_service import get_rabbitmq_service
@@ -187,80 +187,48 @@ class TranslationWorker:
             )
 
             try:
-                # 批量翻译文件，每批10个
-                batch_size = 10
+                # 顺序翻译所有文件（旧版 worker，建议使用新的 coordinator + file workers）
                 total_files = len(rwmod.unit_datas)
-                cache_dict: dict[str, str] = {}
 
-                # 先加载所有可用的缓存
-                print(f"[{task_id}] 加载翻译缓存")
-                for inifile in rwmod.unit_datas:
-                    file_content = self._inifile_to_string(inifile)
-                    cached_translations = await self.cache_service.get_cached_translation(
-                        inifile.path, file_content
-                    )
-                    if cached_translations:
-                        cache_dict.update(cached_translations)
+                print(f"[{task_id}] 开始顺序翻译 {total_files} 个文件")
 
-                # 分批处理文件
-                for batch_start in range(0, total_files, batch_size):
-                    batch_end = min(batch_start + batch_size, total_files)
-                    batch_files = rwmod.unit_datas[batch_start:batch_end]
-
+                for idx, inifile in enumerate(rwmod.unit_datas):
+                    file_name = os.path.basename(inifile.path)
                     print(
-                        f"[{task_id}] 翻译文件批次 {batch_start + 1}-{batch_end}/{total_files}"
+                        f"[{task_id}] 翻译文件: {file_name} ({idx + 1}/{total_files})"
                     )
 
-                    # 批量翻译
-                    translated_files = await translate_inifiles_batch(
-                        batch_files,
-                        translate_style=style,
-                        mod_id=task_id,
-                        target_language=target_language,
-                        batch_size=batch_size,
-                        cache_dict=cache_dict,
+                    # 翻译文件（使用新的简化版本）
+                    translated_inifile = await translate_inifile(
+                        inifile, translate_style=style, target_language=target_language
                     )
 
-                    # 保存翻译结果并更新缓存
-                    for idx, translated_inifile in enumerate(translated_files):
-                        file_name = os.path.basename(translated_inifile.path)
+                    # 保存文件
+                    self._save_inifile(translated_inifile)
 
-                        # 保存文件
-                        self._save_inifile(translated_inifile)
-
-                        # 更新缓存 - 保存新翻译的内容
-                        original_inifile = batch_files[idx]
-                        translations = {}
-                        for section in original_inifile.data.keys():
-                            for key in original_inifile.data[section]:
-                                original_text = original_inifile.data[section][key]
-                                translated_text = translated_inifile.data[section][key]
-                                if original_text != translated_text:
-                                    translations[original_text] = translated_text
-
-                        if translations:
-                            file_content = self._inifile_to_string(original_inifile)
-                            await self.cache_service.save_translation(
-                                original_inifile.path, file_content, translations
-                            )
-
-                        # 更新进度
-                        current_file_num = batch_start + idx + 1
-                        progress = 40.0 + (50.0 * current_file_num / total_files)
-                        await self.task_manager.update_task(
-                            task_id,
-                            progress=progress,
-                            current_file=file_name,
-                            processed_files=current_file_num,
-                        )
+                    # 更新进度
+                    progress = 40.0 + (50.0 * (idx + 1) / total_files)
+                    await self.task_manager.update_task(
+                        task_id,
+                        progress=progress,
+                        current_file=file_name,
+                        processed_files=idx + 1,
+                    )
 
                 print(f"[{task_id}] 翻译完成，共处理 {total_files} 个文件")
 
             except Exception as e:
+                import traceback
+
                 error_msg = f"翻译文件失败: {str(e)}"
+                error_details = traceback.format_exc()
                 print(f"[{task_id}] {error_msg}")
+                print(f"[{task_id}] 错误详情:\n{error_details}")
+
                 await self.task_manager.update_task(
-                    task_id, status=TaskStatus.FAILED, error_message=error_msg
+                    task_id,
+                    status=TaskStatus.FAILED,
+                    error_message=f"{error_msg}\n\n详细信息:\n{error_details[:500]}",
                 )
                 raise
 

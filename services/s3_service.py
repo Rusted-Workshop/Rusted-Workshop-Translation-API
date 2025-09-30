@@ -122,15 +122,10 @@ class S3Service:
                 aws_secret_access_key=self.aws_secret_access_key,
                 region_name=self.region_name,
                 endpoint_url=self.endpoint_url,
-                config=Config(
-                    signature_version="s3v4"
-                ),
+                config=Config(signature_version="s3v4"),
             )
 
-            params = {
-                "Bucket": bucket,
-                "Key": key
-            }
+            params = {"Bucket": bucket, "Key": key}
 
             if content_type:
                 params["ContentType"] = content_type
@@ -169,9 +164,7 @@ class S3Service:
                 aws_secret_access_key=self.aws_secret_access_key,
                 region_name=self.region_name,
                 endpoint_url=self.endpoint_url,
-                config=Config(
-                    signature_version="s3v4"
-                ),
+                config=Config(signature_version="s3v4"),
             )
 
             presigned_url = s3_client.generate_presigned_url(

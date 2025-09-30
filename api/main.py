@@ -146,6 +146,9 @@ async def run_task(request: TaskRunRequest):
 
     # 发送消息到 RabbitMQ
     try:
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+
         rabbitmq = get_rabbitmq_service()
         rabbitmq.connect()
         rabbitmq.declare_queue("translation_tasks")
@@ -166,7 +169,7 @@ async def run_task(request: TaskRunRequest):
     return TaskResponse(
         task_id=task.task_id,
         status=task.status,
-        progress=task.progress,
+        progress=round(task.progress, 2),
         current_file=task.current_file,
         total_files=task.total_files,
         processed_files=task.processed_files,
@@ -205,7 +208,7 @@ async def get_task(task_id: str):
     return TaskResponse(
         task_id=task.task_id,
         status=task.status,
-        progress=task.progress,
+        progress=round(task.progress, 2),
         current_file=task.current_file,
         total_files=task.total_files,
         processed_files=task.processed_files,
@@ -247,7 +250,7 @@ async def list_tasks(
             TaskResponse(
                 task_id=task.task_id,
                 status=task.status,
-                progress=task.progress,
+                progress=round(task.progress, 2),
                 current_file=task.current_file,
                 total_files=task.total_files,
                 processed_files=task.processed_files,
