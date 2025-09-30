@@ -1,8 +1,8 @@
-import os
 import hashlib
+import os
 
-from core.translate import is_text_key_valid, analysis_style, translate_inifile
-from utlis.ini_lib import found_ini_files, IniFile
+from core.translate import analysis_style, is_text_key_valid, translate_inifile
+from utlis.ini_lib import IniFile, found_ini_files
 from utlis.redis_lib import get_db
 
 
@@ -42,7 +42,7 @@ class RWMod:
             redis = get_db()
         translate_cache_key = f"translate_cache:{self.uuid}"
 
-        if use_cache and redis.hexists(translate_cache_key, "style"):
+        if use_cache and redis and redis.hexists(translate_cache_key, "style"):
             print(f"[{self.uuid}] 获取缓存风格信息")
             style = redis.hget(translate_cache_key, "style").decode("utf-8")
         else:
@@ -69,7 +69,7 @@ class RWMod:
             ]
 
             style = analysis_style(style_analysis_case_text)
-            if use_cache:
+            if use_cache and redis:
                 print(f"[{self.uuid}] 缓存风格信息")
                 redis.hset(translate_cache_key, "style", style)
         return style

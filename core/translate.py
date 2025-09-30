@@ -1,12 +1,11 @@
 import json
 import re
-from typing import Type
 
 from pydantic import BaseModel
 
 from core.agents.translate import create_agent
 from core.agents.translate_style_analysis import translate_style_analysis_agent
-from utlis.ini_lib import generate_model_from_dict, IniFile
+from utlis.ini_lib import IniFile, generate_model_from_dict
 from utlis.redis_lib import get_db
 
 TEXT_KEYS_REGEX = re.compile(
@@ -45,7 +44,7 @@ def translate_tasks(
     tasks: dict, translate_style: str, target_language: str = "中文"
 ) -> BaseModel:
     translate_style += f"\n\n目标语言: {target_language}"
-    OutputSchema: Type[BaseModel] = generate_model_from_dict(tasks)
+    OutputSchema: type[BaseModel] = generate_model_from_dict(tasks)
     response = create_agent(OutputSchema).run(translate_style)
     if isinstance(response, str):
         return OutputSchema.model_validate(json.loads(response))
@@ -54,7 +53,10 @@ def translate_tasks(
 
 
 def analysis_style(content: str) -> str:
-    return translate_style_analysis_agent.run(content).content
+    result: str | None = translate_style_analysis_agent.run(content).content
+    if result is None:
+        raise ValueError("Translation style analysis failed.")
+    return result
 
 
 def translate_inifile(
@@ -82,8 +84,8 @@ def translate_inifile(
 
     # 翻译任务
     for section, key in text_keys:
-        text = inifile.data[section][key]
-        if redis.hget(translate_cache_key, text):
+        text: str = inifile.data[section][key]
+        if use_cache and redis and redis.hget(translate_cache_key, text):
             translated_text = redis.hget(translate_cache_key, text).decode("utf-8")
             inifile.data[section][key] = translated_text
         else:

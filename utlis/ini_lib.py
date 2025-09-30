@@ -1,18 +1,18 @@
-import os
 import configparser
+import os
 import re
 import sys
-from typing import Dict, Any, Type
+from typing import Any
 
 import chardet
-from pydantic import BaseModel, create_model, Field
+from pydantic import BaseModel, Field, create_model
 
 
 def generate_model_from_dict(
-    data: Dict[str, Any], model_name: str = "Model"
-) -> Type[BaseModel]:
+    data: dict[str, Any], model_name: str = "Model"
+) -> type[BaseModel]:
     """
-    从简单字典 (Dict[str, str]) 生成 Pydantic 模型。
+    从简单字典 (dict[str, str]) 生成 Pydantic 模型。
     """
     top_fields = {}
     for key, value in data.items():
@@ -189,10 +189,12 @@ def read_ini_file(
     if ini_file_path:
         content = read_file(ini_file_path)
         config.read_string(content)
-    else:
+    elif content:
         config.read_string(content)
 
     # 将INI文件内容转换为字典
-    ini_content = {section: dict(config[section]) for section in config.sections()}
+    ini_content: dict = {
+        section: dict(config[section]) for section in config.sections()
+    }
 
     return ini_content

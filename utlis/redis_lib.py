@@ -1,10 +1,11 @@
 from redis import Redis
+
 from utlis.config import (
-    REDIS_HOST,
-    REDIS_PORT,
     REDIS_DB,
-    REDIS_USERNAME,
+    REDIS_HOST,
     REDIS_PASSWORD,
+    REDIS_PORT,
+    REDIS_USERNAME,
 )
 
 
