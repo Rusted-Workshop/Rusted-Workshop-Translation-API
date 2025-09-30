@@ -191,21 +191,21 @@ class FileTranslationWorker:
     def _save_inifile(self, inifile: IniFile):
         """保存INI文件，使用 : 分隔字段和value，完整处理转义"""
         import os
-        
+
         # 确保目录存在
         os.makedirs(os.path.dirname(inifile.path), exist_ok=True)
-        
+
         with open(inifile.path, "w", encoding="utf-8") as f:
             for section, data in inifile.data.items():
                 # 写入 section 头部
                 f.write(f"[{section}]\n")
-                
+
                 for key, value in data.items():
                     # 完整处理转义字符
                     formatted_value = self._escape_ini_value(value)
                     # 使用 : 分隔，左右无空格
                     f.write(f"{key}:{formatted_value}\n")
-                
+
                 # 每个 section 后空行
                 f.write("\n")
 
@@ -213,10 +213,10 @@ class FileTranslationWorker:
         """INI值转义处理"""
         if value is None:
             return ""
-        
+
         # 字符串转义规则
         escapes = {
-            '\n': '\\n',    # 换行符
+            "\n": "\\n",  # 换行符
             # '\t': '\\t',    # 制表符
             # '\r': '\\r',    # 回车符
             # '\\': '\\\\',   # 反斜杠
@@ -227,7 +227,7 @@ class FileTranslationWorker:
             # '#': '\\#',     # 注释符号
             # ';': '\\;',     # 注释符号
         }
-        
+
         # 逐字符检查并转义
         escaped_value = ""
         for char in value:
@@ -235,9 +235,8 @@ class FileTranslationWorker:
                 escaped_value += escapes[char]
             else:
                 escaped_value += char
-        
-        return escaped_value
 
+        return escaped_value
 
 
 if __name__ == "__main__":

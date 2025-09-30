@@ -18,7 +18,7 @@ class RWMod:
             pass
 
         if os.path.isdir(path):
-            print(f"[{self.uuid}] 扫描ini文件")
+            print(f"[{self.uuid}] 扫描ini、mod-info.txt和template文件")
 
             for file_path in found_ini_files(path):
                 try:
@@ -28,11 +28,7 @@ class RWMod:
 
             self.files_count = len(self.unit_datas)
 
-        print(f"[{self.uuid}] 扫描ini完成")
-        mod_info_filepath = os.path.join(path, "mod-info.txt")
-        if "mod-info.txt" in os.listdir(path):
-            mod_info = IniFile(mod_info_filepath)
-            self.unit_datas.append(mod_info)
+        print(f"[{self.uuid}] 扫描完成")
 
     async def analysis_style(self, use_cache: bool = True) -> str:
         print(f"[{self.uuid}] 分析风格信息")
@@ -62,6 +58,4 @@ class RWMod:
 
     async def translate_all(self):
         for inifile in self.unit_datas:
-            await translate_inifile(
-                inifile, translate_style=self.style, mod_id=self.uuid
-            )
+            await translate_inifile(inifile, translate_style=self.style)
