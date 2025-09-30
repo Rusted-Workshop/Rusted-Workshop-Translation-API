@@ -134,7 +134,6 @@ async def run_task(request: TaskRunRequest):
             status=TaskStatus.PENDING,
             progress=0.0,
             error_message=None,
-            current_file=None,
             processed_files=0,
         )
         task = await task_manager.get_task(request.task_id)
@@ -170,7 +169,6 @@ async def run_task(request: TaskRunRequest):
         task_id=task.task_id,
         status=task.status,
         progress=round(task.progress, 2),
-        current_file=task.current_file,
         total_files=task.total_files,
         processed_files=task.processed_files,
         error_message=task.error_message,
@@ -209,7 +207,6 @@ async def get_task(task_id: str):
         task_id=task.task_id,
         status=task.status,
         progress=round(task.progress, 2),
-        current_file=task.current_file,
         total_files=task.total_files,
         processed_files=task.processed_files,
         error_message=task.error_message,
@@ -251,7 +248,6 @@ async def list_tasks(
                 task_id=task.task_id,
                 status=task.status,
                 progress=round(task.progress, 2),
-                current_file=task.current_file,
                 total_files=task.total_files,
                 processed_files=task.processed_files,
                 error_message=task.error_message,

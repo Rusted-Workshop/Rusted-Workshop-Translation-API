@@ -187,8 +187,12 @@ def read_ini_file(
     if ini_file_path and not os.path.isfile(ini_file_path):
         raise FileNotFoundError(f"The path {ini_file_path} is not a file.")
 
-    # 读取INI
-    config = configparser.RawConfigParser(strict=False)
+    # 读取INI - 保持键名的原始大小写
+    class MyRawConfigParser(configparser.RawConfigParser):
+        def optionxform(self, optionstr):
+            return optionstr
+
+    config = MyRawConfigParser(strict=False)
 
     if ini_file_path:
         content = read_file(ini_file_path)

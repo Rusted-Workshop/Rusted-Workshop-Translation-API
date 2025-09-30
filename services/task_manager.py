@@ -52,7 +52,6 @@ class TaskManager:
         task_id: str,
         status: Optional[TaskStatus] = None,
         progress: Optional[float] = None,
-        current_file: Optional[str] = None,
         total_files: Optional[int] = None,
         processed_files: Optional[int] = None,
         error_message: Optional[str] = None,
@@ -67,8 +66,6 @@ class TaskManager:
             task.status = status
         if progress is not None:
             task.progress = progress
-        if current_file is not None:
-            task.current_file = current_file
         if total_files is not None:
             task.total_files = total_files
         if processed_files is not None:

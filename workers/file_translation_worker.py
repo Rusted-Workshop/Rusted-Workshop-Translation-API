@@ -160,7 +160,7 @@ class FileTranslationWorker:
         file_id: str,
         status: FileTaskStatus,
         cache_service: TranslationCache,
-        error_message: str = None,
+        error_message: str = "",
     ):
         """
         更新文件任务状态到 Redis
@@ -189,20 +189,55 @@ class FileTranslationWorker:
         return "\n".join(lines)
 
     def _save_inifile(self, inifile: IniFile):
-        """保存INI文件"""
-        import configparser
-
-        config = configparser.RawConfigParser()
-
-        for section, data in inifile.data.items():
-            config.add_section(section)
-            for key, value in data.items():
-                # 将换行符转换回 \n
-                value = value.replace("\n", "\\n")
-                config.set(section, key, value)
-
+        """保存INI文件，使用 : 分隔字段和value，完整处理转义"""
+        import os
+        
+        # 确保目录存在
+        os.makedirs(os.path.dirname(inifile.path), exist_ok=True)
+        
         with open(inifile.path, "w", encoding="utf-8") as f:
-            config.write(f, space_around_delimiters=False)
+            for section, data in inifile.data.items():
+                # 写入 section 头部
+                f.write(f"[{section}]\n")
+                
+                for key, value in data.items():
+                    # 完整处理转义字符
+                    formatted_value = self._escape_ini_value(value)
+                    # 使用 : 分隔，左右无空格
+                    f.write(f"{key}:{formatted_value}\n")
+                
+                # 每个 section 后空行
+                f.write("\n")
+
+    def _escape_ini_value(self, value):
+        """INI值转义处理"""
+        if value is None:
+            return ""
+        
+        # 字符串转义规则
+        escapes = {
+            '\n': '\\n',    # 换行符
+            '\t': '\\t',    # 制表符
+            '\r': '\\r',    # 回车符
+            '\\': '\\\\',   # 反斜杠
+            '"': '\\"',     # 双引号
+            ':': '\\:',     # 冒号（我们的分隔符）
+            '[': '\\[',     # 左方括号（避免被误认为是section）
+            ']': '\\]',     # 右方括号
+            '#': '\\#',     # 注释符号
+            ';': '\\;',     # 注释符号
+        }
+        
+        # 逐字符检查并转义
+        escaped_value = ""
+        for char in value:
+            if char in escapes:
+                escaped_value += escapes[char]
+            else:
+                escaped_value += char
+        
+        return escaped_value
+
 
 
 if __name__ == "__main__":

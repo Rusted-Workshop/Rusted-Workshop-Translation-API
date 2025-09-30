@@ -211,7 +211,6 @@ class TranslationWorker:
                     await self.task_manager.update_task(
                         task_id,
                         progress=progress,
-                        current_file=file_name,
                         processed_files=idx + 1,
                     )
 

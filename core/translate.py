@@ -212,7 +212,7 @@ async def translate_inifile(
     target_language: str = "中文",
 ) -> IniFile:
     """
-    翻译单个ini文件（简化版，一次翻译一个文件的所有文本）
+    翻译单个ini文件
 
     Args:
         inifile: INI文件对象

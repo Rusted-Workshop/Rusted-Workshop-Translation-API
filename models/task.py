@@ -33,7 +33,6 @@ class TranslationTask(BaseModel):
     target_language: str = Field(default="中文", description="目标语言")
     status: TaskStatus = Field(default=TaskStatus.PENDING, description="任务状态")
     progress: float = Field(default=0.0, description="进度百分比 (0-100)")
-    current_file: Optional[str] = Field(default=None, description="当前处理的文件")
     total_files: int = Field(default=0, description="总文件数")
     processed_files: int = Field(default=0, description="已处理文件数")
     error_message: Optional[str] = Field(default=None, description="错误信息")
@@ -69,7 +68,6 @@ class TaskResponse(BaseModel):
     task_id: str
     status: TaskStatus
     progress: float
-    current_file: Optional[str] = None
     total_files: int = 0
     processed_files: int = 0
     error_message: Optional[str] = None
