@@ -1,4 +1,4 @@
-from redis import Redis
+from redis.asyncio import Redis
 
 from utlis.config import (
     REDIS_DB,
@@ -9,11 +9,14 @@ from utlis.config import (
 )
 
 
-def get_db():
-    return Redis(
+async def get_db() -> Redis:
+    if REDIS_HOST is None or REDIS_PORT is None or REDIS_DB is None:
+        raise ValueError("Redis config is not set.")
+
+    return await Redis(
         host=REDIS_HOST,
-        port=REDIS_PORT,
-        db=REDIS_DB,
+        port=int(REDIS_PORT),
+        db=int(REDIS_DB),
         username=REDIS_USERNAME,
         password=REDIS_PASSWORD,
     )

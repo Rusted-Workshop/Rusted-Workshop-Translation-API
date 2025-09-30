@@ -63,6 +63,9 @@ def read_file(file_path) -> str:
         encoding_result = chardet.detect(raw_data)
         detected_encoding = encoding_result["encoding"]
 
+        if detected_encoding is None:
+            raise ValueError("Detected encoding is None.")
+
         # 3. 使用检测到的编码读取文本
         text_content = raw_data.decode(detected_encoding)
 
