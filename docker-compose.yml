@@ -1,0 +1,135 @@
+version: '3.8'
+
+services:
+  # API 服务
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8001:8001"
+    environment:
+      # Redis 配置
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_DB=${REDIS_DB:-0}
+
+      # RabbitMQ 配置
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+
+      # S3 配置
+      - S3_ENDPOINT=${S3_ENDPOINT}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_BUCKET=${S3_BUCKET}
+
+      # OpenAI 配置
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
+
+      # 工作目录
+      - WORK_DIR=/tmp/translation_work
+    volumes:
+      - translation_work:/tmp/translation_work
+    restart: unless-stopped
+    networks:
+      - translation-net
+
+  # Coordinator Worker
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile.coordinator
+    environment:
+      # Redis 配置
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_DB=${REDIS_DB:-0}
+
+      # RabbitMQ 配置
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+
+      # S3 配置
+      - S3_ENDPOINT=${S3_ENDPOINT}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_BUCKET=${S3_BUCKET}
+
+      # 工作目录
+      - WORK_DIR=/tmp/translation_work
+    volumes:
+      - translation_work:/tmp/translation_work
+    restart: unless-stopped
+    networks:
+      - translation-net
+
+  # File Translation Worker
+  file-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.file-worker
+    environment:
+      # Redis 配置
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_DB=${REDIS_DB:-0}
+
+      # RabbitMQ 配置
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+
+      # S3 配置
+      - S3_ENDPOINT=${S3_ENDPOINT}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_BUCKET=${S3_BUCKET}
+
+      # OpenAI 配置
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
+
+      # 工作目录
+      - WORK_DIR=/tmp/translation_work
+    volumes:
+      - translation_work:/tmp/translation_work
+    restart: unless-stopped
+    networks:
+      - translation-net
+    # 可以通过 deploy 扩展多个实例
+    deploy:
+      replicas: 4
+
+  # Cleanup Worker
+  cleanup:
+    build:
+      context: .
+      dockerfile: Dockerfile.cleanup
+    environment:
+      - WORK_DIR=/tmp/translation_work
+      - RETENTION_DAYS=${RETENTION_DAYS:-7}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-3600}
+    volumes:
+      - translation_work:/tmp/translation_work
+    restart: unless-stopped
+    networks:
+      - translation-net
+
+volumes:
+  translation_work:
+
+networks:
+  translation-net:
+    driver: bridge
