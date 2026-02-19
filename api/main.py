@@ -62,7 +62,9 @@ def _raise_api_error(
     raise HTTPException(status_code=status_code, detail=payload)
 
 
-def _to_task_response(task: TranslationTask, download_url: str | None = None) -> TaskResponse:
+def _to_task_response(
+    task: TranslationTask, download_url: str | None = None
+) -> TaskResponse:
     return TaskResponse(
         task_id=task.task_id,
         status=task.status,
@@ -123,7 +125,9 @@ async def create_task(
     try:
         await s3_service.upload_file(tmp_path, S3_BUCKET, s3_source_key)
     except Exception as e:
-        _raise_api_error(500, "S3_UPLOAD_FAILED", "Failed to upload source file", {"error": str(e)})
+        _raise_api_error(
+            500, "S3_UPLOAD_FAILED", "Failed to upload source file", {"error": str(e)}
+        )
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -141,7 +145,9 @@ async def create_task(
     try:
         task = await task_manager.create_task(task)
     except Exception as e:
-        _raise_api_error(500, "TASK_CREATE_FAILED", "Failed to create task", {"error": str(e)})
+        _raise_api_error(
+            500, "TASK_CREATE_FAILED", "Failed to create task", {"error": str(e)}
+        )
 
     try:
         _queue_task(task)
@@ -151,7 +157,9 @@ async def create_task(
             status=TaskStatus.FAILED,
             error_message=f"Failed to queue task: {str(e)}",
         )
-        _raise_api_error(500, "QUEUE_PUBLISH_FAILED", "Failed to queue task", {"error": str(e)})
+        _raise_api_error(
+            500, "QUEUE_PUBLISH_FAILED", "Failed to queue task", {"error": str(e)}
+        )
 
     return _to_task_response(task)
 
@@ -176,13 +184,13 @@ async def get_task(task_id: str):
     return _to_task_response(task, download_url)
 
 
-@app.get("/v1/tasks", response_model=List[TaskResponse])
-async def list_tasks(
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-):
-    tasks = await task_manager.list_tasks(limit=limit, offset=offset)
-    return [_to_task_response(task) for task in tasks]
+# @app.get("/v1/tasks", response_model=List[TaskResponse])
+# async def list_tasks(
+#     limit: int = Query(default=50, ge=1, le=100),
+#     offset: int = Query(default=0, ge=0),
+# ):
+#     tasks = await task_manager.list_tasks(limit=limit, offset=offset)
+#     return [_to_task_response(task) for task in tasks]
 
 
 @app.delete("/v1/tasks/{task_id}", status_code=204)
@@ -224,7 +232,9 @@ async def retry_task(task_id: str):
             status=TaskStatus.FAILED,
             error_message=f"Failed to queue retry: {str(e)}",
         )
-        _raise_api_error(500, "QUEUE_PUBLISH_FAILED", "Failed to queue retry", {"error": str(e)})
+        _raise_api_error(
+            500, "QUEUE_PUBLISH_FAILED", "Failed to queue retry", {"error": str(e)}
+        )
 
     return _to_task_response(task)
 
@@ -244,8 +254,8 @@ async def get_result_url(task_id: str):
             expiration=3600,
         )
     except Exception as e:
-        _raise_api_error(500, "PRESIGN_FAILED", "Failed to generate download URL", {"error": str(e)})
+        _raise_api_error(
+            500, "PRESIGN_FAILED", "Failed to generate download URL", {"error": str(e)}
+        )
 
     return {"task_id": task_id, "download_url": download_url, "expires_in": 3600}
-
-
