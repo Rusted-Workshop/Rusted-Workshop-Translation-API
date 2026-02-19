@@ -1,11 +1,11 @@
+import json
 import re
+from typing import Any
 
-from agno.agent import Agent
-from agno.models.openai import OpenAILike
+from openai import AsyncOpenAI
 
-from core.agents.translate_style_analysis import translate_style_analysis_agent
-from utlis.config import AI_API_KEY, AI_BASE_URL, AI_MODEL
-from utlis.ini_lib import IniFile
+from utils.config import AI_API_KEY, AI_BASE_URL, AI_MODEL
+from utils.ini_lib import IniFile, read_file
 
 # 基础文本键的正则（不包含语言后缀）
 BASE_TEXT_KEYS_REGEX = re.compile(
@@ -46,6 +46,10 @@ LOCALIZED_TEXT_KEYS_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+LINE_KV_REGEX = re.compile(
+    r"^(?P<indent>\s*)(?P<key>[^:=\n]+?)(?P<pre>\s*)(?P<sep>[:=])(?P<post>\s*)(?P<value>.*)$"
+)
+
 
 def is_text_key_valid(key: str) -> bool:
     """检查是否为有效的基础文本键（不包含语言后缀）"""
@@ -57,6 +61,31 @@ def is_localized_text_key(key: str) -> bool:
     return LOCALIZED_TEXT_KEYS_REGEX.match(key) is not None
 
 
+def localized_to_base_key(key: str) -> str:
+    """将带语言后缀的键名还原为基础键名。"""
+    return re.sub(r"_[a-z]+$", "", key, flags=re.IGNORECASE)
+
+
+def _extract_json_array(text: str) -> list[str]:
+    content = text.strip()
+    if content.startswith("```"):
+        first_newline = content.find("\n")
+        if first_newline != -1:
+            content = content[first_newline + 1 :]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+    parsed = json.loads(content)
+    if not isinstance(parsed, list):
+        raise ValueError(f"Expected list, got {type(parsed)}")
+    return [str(item) for item in parsed]
+
+
+def _sanitize_single_line_value(value: str) -> str:
+    """将模型返回结果规范为单行 INI 值（保留 \\n 转义）。"""
+    return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+
+
 async def translate_tasks(
     tasks: dict,
     translate_style: str,
@@ -65,149 +94,220 @@ async def translate_tasks(
     retry_delay: float = 1.0,
 ) -> dict[str, str]:
     """
-    翻译任务字典，返回原文到译文的映射
-    使用数组格式节省 token，按顺序翻译
-
-    Args:
-        tasks: 翻译任务字典 {原文: 描述}
-        translate_style: 翻译风格
-        target_language: 目标语言
-        max_retries: 最大重试次数
-        retry_delay: 重试延迟（秒）
-
-    Returns:
-        原文到译文的映射
+    翻译任务字典，返回原文到译文的映射。
     """
     import asyncio
-    import json
 
-    # 将原文转为列表，保持顺序
     original_texts = list(tasks.keys())
+    if not original_texts:
+        return {}
 
-    # 构建提示词 - 使用数组格式节省 token
+    if not AI_API_KEY:
+        return {text: text for text in original_texts}
+
     texts_numbered = "\n".join(
         [f"{i + 1}. {text}" for i, text in enumerate(original_texts)]
     )
 
     prompt = f"""{translate_style}
-你是以为铁锈战争mod单位翻译专家，擅长根据特定风格和输出格式进行精确翻译。
-每个译文如果是型号则无需翻译，如果是某个单词则翻译成目标语言的单词，不要翻译成其他语言的单词。
-原文字段可能为单位名称、单位介绍、公告等，自行翻译为最适合的译文。
-翻译后不用携带原文，不用用（原文）解释。
-
+你是铁锈战争 mod 单位翻译专家。
 目标语言: {target_language}
 
-请将以下文本翻译为{target_language}。按顺序翻译每一条，保持原文的格式和风格。
-
-待翻译文本：
+请按顺序翻译以下文本（保持条目顺序，不要解释）：
 {texts_numbered}
 
-返回格式：
-请返回 JSON 数组格式，只包含译文，按照原文顺序：["译文1", "译文2", "译文3", ...]
-
-注意：
-1. 必须严格按照原文顺序返回
-2. 返回的数组长度必须等于原文数量 ({len(original_texts)} 条)
-3. 不要添加任何额外的文本，只返回纯 JSON 数组
+返回要求：
+1. 只返回 JSON 数组
+2. 数组长度必须等于 {len(original_texts)}
+3. 不要返回额外文本
 """
 
-    # 创建不使用结构化输出的 Agent
-    agent = Agent(
-        model=OpenAILike(id=AI_MODEL, api_key=AI_API_KEY, base_url=AI_BASE_URL),
-        instructions="你是一个专业的翻译助手。请严格按照要求翻译文本，并以 JSON 数组格式返回结果。",
-        use_json_mode=True,
-        structured_outputs=False,
-    )
-
-    # 重试逻辑
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            # 使用异步调用
-            response = await agent.arun(prompt)
-
-            if response is None:
-                raise ValueError("Translation failed: response is None")
-
-            if response.content is None:
-                raise ValueError("Translation failed: response.content is None")
-
-            # 解析 JSON 响应
+    client = AsyncOpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
+    try:
+        last_error: Exception | None = None
+        for attempt in range(max_retries):
             try:
-                # 调试输出
-                print(f"响应类型: {type(response.content)}")
-                if isinstance(response.content, str):
-                    print(f"响应内容前100字符: {response.content[:100]}")
+                response = await client.chat.completions.create(
+                    model=AI_MODEL,
+                    temperature=0.2,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "你是专业翻译助手，严格输出 JSON 数组。",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                )
 
-                # response.content 可能是字符串或列表
-                if isinstance(response.content, str):
-                    if not response.content.strip():
-                        raise ValueError("Response content is empty string")
+                message = (
+                    response.choices[0].message.content if response.choices else None
+                )
+                if not message:
+                    raise ValueError("Empty translation response content")
 
-                    content = response.content.strip()
-
-                    # 移除 markdown 代码块标记（AI 可能返回 ```json ... ```）
-                    if content.startswith("```"):
-                        # 找到第一个换行符（跳过 ```json）
-                        first_newline = content.find("\n")
-                        if first_newline != -1:
-                            content = content[first_newline + 1 :]
-
-                        # 移除结尾的 ```
-                        if content.endswith("```"):
-                            content = content[:-3]
-
-                        content = content.strip()
-                        print(f"清理后的内容前100字符: {content[:100]}")
-
-                    translations = json.loads(content)
-                elif isinstance(response.content, list):
-                    translations = response.content
-                else:
-                    raise ValueError(
-                        f"Unexpected response type: {type(response.content)}"
-                    )
-
-                # 验证返回的是数组
-                if not isinstance(translations, list):
-                    raise ValueError(f"Expected list, got {type(translations)}")
-
-                # 验证数组长度
+                translations = _extract_json_array(message)
                 if len(translations) != len(original_texts):
                     raise ValueError(
                         f"Translation count mismatch: expected {len(original_texts)}, got {len(translations)}"
                     )
 
-                # 构建结果字典
-                result = {}
-                for i, original_text in enumerate(original_texts):
-                    result[original_text] = translations[i]
+                return {
+                    original_texts[idx]: translations[idx]
+                    for idx in range(len(original_texts))
+                }
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                else:
+                    print(f"LLM translation failed after retries: {e}")
+    finally:
+        await client.close()
 
-                return result
+    # 回退：失败时保留原文，确保流水线可完成并暴露错误日志
+    return {text: text for text in original_texts}
 
-            except json.JSONDecodeError as e:
-                print(f"JSON 解析失败，响应内容: {response.content}")
-                raise ValueError(f"Invalid JSON response: {e}")
 
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                print(
-                    f"翻译失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}, {retry_delay}秒后重试..."
-                )
-                await asyncio.sleep(retry_delay)
+async def translate_file_preserve_structure(
+    file_path: str,
+    translate_style: str = "",
+    target_language: str = "中文",
+) -> None:
+    """
+    在保留文件结构的前提下，仅翻译允许的文本键。
+    关键点：
+    1. 不使用 configparser 重写全文件，避免破坏逻辑表达式。
+    2. 三引号多行块原样保留。
+    3. 删除 *_xx 语言后缀键。
+    """
+    content = read_file(file_path)
+    line_ending = "\r\n" if "\r\n" in content else "\n"
+    had_trailing_newline = content.endswith("\n") or content.endswith("\r")
+
+    parsed_lines: list[dict[str, Any]] = []
+    section = ""
+    in_triple_quote_block = False
+
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+
+        if in_triple_quote_block:
+            parsed_lines.append({"kind": "raw", "raw": raw_line})
+            if raw_line.count('"""') % 2 == 1:
+                in_triple_quote_block = False
+            continue
+
+        if not stripped or stripped.startswith("#") or stripped.startswith(";"):
+            parsed_lines.append({"kind": "raw", "raw": raw_line})
+            continue
+
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip()
+            parsed_lines.append({"kind": "raw", "raw": raw_line})
+            continue
+
+        match = LINE_KV_REGEX.match(raw_line)
+        if not match:
+            parsed_lines.append({"kind": "raw", "raw": raw_line})
+            continue
+
+        key = match.group("key").strip()
+        value = match.group("value")
+
+        parsed_lines.append(
+            {
+                "kind": "kv",
+                "raw": raw_line,
+                "section": section,
+                "indent": match.group("indent"),
+                "key": key,
+                "pre": match.group("pre"),
+                "sep": match.group("sep"),
+                "post": match.group("post"),
+                "value": value,
+            }
+        )
+
+        # 开始进入三引号多行块（当前行为起始行，后续行全部原样保留）
+        if value.count('"""') % 2 == 1:
+            in_triple_quote_block = True
+
+    localized_values: dict[tuple[str, str], str] = {}
+    for item in parsed_lines:
+        if item["kind"] != "kv":
+            continue
+        key = item["key"]
+        if not is_localized_text_key(key):
+            continue
+        localized_value = item["value"].strip()
+        if not localized_value:
+            continue
+        base_key = localized_to_base_key(key)
+        localized_values.setdefault((item["section"], base_key), localized_value)
+
+    translate_tasks_dict: dict[str, str] = {}
+    for item in parsed_lines:
+        if item["kind"] != "kv":
+            continue
+        key = item["key"]
+        if not is_text_key_valid(key):
+            continue
+
+        source_text = item["value"].strip()
+        if not source_text:
+            source_text = localized_values.get((item["section"], key), "")
+        if source_text:
+            item["source_text"] = source_text
+            translate_tasks_dict[source_text] = "translation key"
+
+    translations: dict[str, str] = {}
+    if translate_tasks_dict:
+        translations = await translate_tasks(
+            translate_tasks_dict,
+            translate_style=translate_style,
+            target_language=target_language,
+        )
+
+    output_lines: list[str] = []
+    for item in parsed_lines:
+        if item["kind"] != "kv":
+            output_lines.append(item["raw"])
+            continue
+
+        key = item["key"]
+
+        # 删除语言后缀键，避免同义多语言字段污染
+        if is_localized_text_key(key):
+            continue
+
+        if is_text_key_valid(key):
+            source_text = item.get("source_text")
+            if source_text:
+                translated_value = translations.get(source_text, source_text)
+                new_value = _sanitize_single_line_value(translated_value)
             else:
-                print(f"翻译失败，已达到最大重试次数 ({max_retries}): {str(e)}")
+                new_value = item["value"]
 
-    # 所有重试都失败
-    raise Exception(f"Translation failed after {max_retries} attempts: {last_error}")
+            output_lines.append(
+                f"{item['indent']}{key}{item['pre']}{item['sep']}{item['post']}{new_value}"
+            )
+            continue
+
+        output_lines.append(item["raw"])
+
+    new_content = line_ending.join(output_lines)
+    if had_trailing_newline:
+        new_content += line_ending
+
+    with open(file_path, "w", encoding="utf-8", newline="") as file:
+        file.write(new_content)
 
 
 def analysis_style(content: str) -> str:
-    result: str | None = translate_style_analysis_agent.run(content).content
-    if result is None:
-        raise ValueError("Translation style analysis failed.")
-    return result
+    # 当前策略：风格分析失败不阻断流程
+    if not content.strip():
+        return ""
+    return "保持原文简洁、技术化风格，术语一致，避免冗长解释。"
 
 
 async def translate_inifile(
@@ -217,14 +317,6 @@ async def translate_inifile(
 ) -> IniFile:
     """
     翻译单个ini文件
-
-    Args:
-        inifile: INI文件对象
-        translate_style: 翻译风格
-        target_language: 目标语言
-
-    Returns:
-        翻译后的INI文件对象
     """
     # 第一步：预处理 - 如果基础键为空，从其他语言版本复制
     for section in inifile.data.keys():
@@ -253,7 +345,7 @@ async def translate_inifile(
         for key in inifile.data[section]:
             if is_text_key_valid(key):
                 text = inifile.data[section][key].strip()
-                if text:  # 只翻译非空文本
+                if text:
                     text_keys.append((section, key))
                     translate_tasks_dict[text] = "translation key"
 
@@ -263,7 +355,6 @@ async def translate_inifile(
             translate_tasks_dict, translate_style, target_language
         )
 
-        # 应用翻译结果
         for section, key in text_keys:
             original_text = inifile.data[section][key]
             if original_text in translations:

@@ -1,6 +1,6 @@
 from redis.asyncio import Redis
 
-from utlis.config import (
+from utils.config import (
     REDIS_DB,
     REDIS_HOST,
     REDIS_PASSWORD,
@@ -19,3 +19,4 @@ def get_redis_connection() -> Redis:
         password=REDIS_PASSWORD if REDIS_PASSWORD else None,
         decode_responses=True,
     )
+

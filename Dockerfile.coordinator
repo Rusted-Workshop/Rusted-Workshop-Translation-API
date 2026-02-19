@@ -12,7 +12,7 @@ COPY pyproject.toml ./
 COPY core ./core
 COPY models ./models
 COPY services ./services
-COPY utlis ./utlis
+COPY utils ./utils
 COPY workers/coordinator_worker.py ./workers/
 COPY workers/__init__.py ./workers/
 

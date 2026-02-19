@@ -12,9 +12,8 @@ COPY pyproject.toml ./
 COPY core ./core
 COPY models ./models
 COPY services ./services
-COPY utlis ./utlis
+COPY utils ./utils
 COPY workers/file_translation_worker.py ./workers/
-COPY workers/translation_worker.py ./workers/
 COPY workers/__init__.py ./workers/
 
 # 安装 Python 依赖

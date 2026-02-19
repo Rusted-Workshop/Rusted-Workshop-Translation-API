@@ -9,8 +9,9 @@ RUN apt-get update && apt-get install -y \
 
 # 复制项目文件
 COPY pyproject.toml ./
+COPY models ./models
 COPY services ./services
-COPY utlis ./utlis
+COPY utils ./utils
 COPY workers/cleanup_worker.py ./workers/
 COPY workers/__init__.py ./workers/
 COPY start_cleanup.py ./

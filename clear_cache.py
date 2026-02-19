@@ -21,9 +21,9 @@ async def clear_all_cache():
     print("\n正在扫描缓存键...")
 
     while True:
-        # 扫描以 translation: 开头的键
+        # 扫描翻译缓存键
         cursor, keys = await cache_service.redis.scan(
-            cursor, match="translation:*", count=100
+            cursor, match="file_translation_cache:*", count=100
         )
 
         if keys:

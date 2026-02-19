@@ -10,11 +10,10 @@ import traceback
 
 from pika.spec import Basic, BasicProperties
 
-from core.translate import translate_inifile
+from core.translate import translate_file_preserve_structure
 from models.file_task import FileTaskStatus, FileTranslationMessage
 from services.cache_service import TranslationCache
 from services.rabbitmq_service import get_rabbitmq_service
-from utlis.ini_lib import IniFile
 
 
 class FileTranslationWorker:
@@ -141,16 +140,12 @@ class FileTranslationWorker:
                 f"文件不存在: {full_path}\n工作目录: {work_dir}\n相对路径: {file_path}"
             )
 
-        # 读取 INI 文件
-        inifile = IniFile(full_path)
-
-        # 翻译文件（使用新的简化版本，一次翻译一个文件的所有文本）
-        translated_inifile = await translate_inifile(
-            inifile, translate_style=translate_style, target_language=target_language
+        # 保留原文件结构，仅替换可翻译文本字段
+        await translate_file_preserve_structure(
+            full_path,
+            translate_style=translate_style,
+            target_language=target_language,
         )
-
-        # 保存翻译结果
-        self._save_inifile(translated_inifile)
 
         print(f"[{task_id}:{file_id}] 文件翻译并保存完成: {file_path}")
 
@@ -179,66 +174,7 @@ class FileTranslationWorker:
             error_key = f"file_task:{task_id}:{file_id}:error"
             await cache_service.redis.set(error_key, error_message, ex=3600)
 
-    def _inifile_to_string(self, inifile: IniFile) -> str:
-        """将INI文件对象转换为字符串"""
-        lines = []
-        for section, data in inifile.data.items():
-            lines.append(f"[{section}]")
-            for key, value in data.items():
-                lines.append(f"{key}={value}")
-        return "\n".join(lines)
-
-    def _save_inifile(self, inifile: IniFile):
-        """保存INI文件，使用 : 分隔字段和value，完整处理转义"""
-        import os
-
-        # 确保目录存在
-        os.makedirs(os.path.dirname(inifile.path), exist_ok=True)
-
-        with open(inifile.path, "w", encoding="utf-8") as f:
-            for section, data in inifile.data.items():
-                # 写入 section 头部
-                f.write(f"[{section}]\n")
-
-                for key, value in data.items():
-                    # 完整处理转义字符
-                    formatted_value = self._escape_ini_value(value)
-                    # 使用 : 分隔，左右无空格
-                    f.write(f"{key}:{formatted_value}\n")
-
-                # 每个 section 后空行
-                f.write("\n")
-
-    def _escape_ini_value(self, value):
-        """INI值转义处理"""
-        if value is None:
-            return ""
-
-        # 字符串转义规则
-        escapes = {
-            "\n": "\\n",  # 换行符
-            # '\t': '\\t',    # 制表符
-            # '\r': '\\r',    # 回车符
-            # '\\': '\\\\',   # 反斜杠
-            # '"': '\\"',     # 双引号
-            # ':': '\\:',     # 冒号
-            # '[': '\\[',     # 左方括号
-            # ']': '\\]',     # 右方括号
-            # '#': '\\#',     # 注释符号
-            # ';': '\\;',     # 注释符号
-        }
-
-        # 逐字符检查并转义
-        escaped_value = ""
-        for char in value:
-            if char in escapes:
-                escaped_value += escapes[char]
-            else:
-                escaped_value += char
-
-        return escaped_value
-
-
 if __name__ == "__main__":
     worker = FileTranslationWorker()
     worker.start()
+

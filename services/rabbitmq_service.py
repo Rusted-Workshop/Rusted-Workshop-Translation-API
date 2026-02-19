@@ -55,6 +55,13 @@ class RabbitMQService:
         if self.channel:
             self.channel.queue_declare(queue=queue_name, durable=durable)
 
+    def purge_queue(self, queue_name: str) -> None:
+        """清空队列中的历史消息"""
+        if not self.channel:
+            self.connect()
+        if self.channel:
+            self.channel.queue_purge(queue=queue_name)
+
     def publish_message(
         self, queue_name: str, message: dict, priority: int = 0
     ) -> None:

@@ -219,3 +219,10 @@ data
 
 test.py
 test.rwmod
+
+# Project temporary artifacts
+artifacts/
+logs/
+.venv_clean/
+tmp*.rwmod
+*.translated.rwmod

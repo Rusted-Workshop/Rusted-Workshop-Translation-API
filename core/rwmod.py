@@ -2,7 +2,7 @@ import hashlib
 import os
 
 from core.translate import analysis_style, is_text_key_valid, translate_inifile
-from utlis.ini_lib import IniFile, found_ini_files
+from utils.ini_lib import IniFile, found_ini_files
 
 
 class RWMod:
@@ -59,3 +59,4 @@ class RWMod:
     async def translate_all(self):
         for inifile in self.unit_datas:
             await translate_inifile(inifile, translate_style=self.style)
+

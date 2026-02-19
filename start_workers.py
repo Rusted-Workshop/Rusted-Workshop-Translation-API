@@ -16,7 +16,7 @@ def start_workers():
     print("=" * 60)
 
     # 读取配置
-    file_worker_count = int(os.getenv("FILE_WORKER_COUNT", "4"))
+    file_worker_count = int(os.getenv("FILE_WORKER_COUNT", "15"))
 
     processes = []
 

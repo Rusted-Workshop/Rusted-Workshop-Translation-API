@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Optional
 
-from utlis.redis_lib import get_redis_connection
+from utils.redis_lib import get_redis_connection
 
 
 class TranslationCache:
@@ -115,3 +115,4 @@ class TranslationCache:
         if keys:
             return await self.redis.delete(*keys)
         return 0
+

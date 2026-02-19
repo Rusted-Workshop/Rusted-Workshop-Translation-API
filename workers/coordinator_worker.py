@@ -119,6 +119,25 @@ class CoordinatorWorker:
         s3_dest_key = message["s3_dest_key"]
         target_language = message.get("target_language", "中文")
 
+        current_task = await self.task_manager.get_task(task_id)
+        if not current_task:
+            raise ValueError(f"任务不存在: {task_id}")
+
+        # 主任务消息可能因网络重连/历史残留被重复消费，终态任务直接跳过
+        if current_task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+            print(
+                f"[{task_id}] 任务已是终态({current_task.status.value})，"
+                "跳过重复消息"
+            )
+            return
+
+        if current_task.status != TaskStatus.PENDING:
+            print(
+                f"[{task_id}] 任务当前状态为 {current_task.status.value}，"
+                "跳过重复/并发消息"
+            )
+            return
+
         # 在当前 event loop 中创建新的 Redis 连接
         cache_service = TranslationCache()
 
@@ -129,7 +148,7 @@ class CoordinatorWorker:
             # 1. 下载文件
             print(f"[{task_id}] 下载文件: {s3_source_url}")
             await self.task_manager.update_task(
-                task_id, status=TaskStatus.DOWNLOADING, progress=5.0
+                task_id, status=TaskStatus.PREPARING, progress=5.0
             )
 
             archive_path = os.path.join(work_dir, "source.rwmod")
@@ -146,7 +165,7 @@ class CoordinatorWorker:
             # 2. 解压文件
             print(f"[{task_id}] 解压文件")
             await self.task_manager.update_task(
-                task_id, status=TaskStatus.EXTRACTING, progress=10.0
+                task_id, status=TaskStatus.PREPARING, progress=10.0
             )
 
             extract_dir = os.path.join(work_dir, "extracted")
@@ -163,7 +182,7 @@ class CoordinatorWorker:
             # 3. 分析模组
             print(f"[{task_id}] 分析模组")
             await self.task_manager.update_task(
-                task_id, status=TaskStatus.ANALYZING, progress=15.0
+                task_id, status=TaskStatus.PREPARING, progress=15.0
             )
 
             try:
@@ -232,7 +251,7 @@ class CoordinatorWorker:
             # 6. 打包
             print(f"[{task_id}] 打包文件")
             await self.task_manager.update_task(
-                task_id, status=TaskStatus.MERGING, progress=90.0
+                task_id, status=TaskStatus.FINALIZING, progress=90.0
             )
 
             try:
@@ -249,7 +268,7 @@ class CoordinatorWorker:
             # 7. 上传到S3
             print(f"[{task_id}] 上传到 S3")
             await self.task_manager.update_task(
-                task_id, status=TaskStatus.UPLOADING, progress=95.0
+                task_id, status=TaskStatus.FINALIZING, progress=95.0
             )
 
             try:
@@ -299,6 +318,14 @@ class CoordinatorWorker:
         file_tasks = self.file_tasks.get(task_id, {})
         total_files = len(file_tasks)
         check_interval = 2  # 每2秒检查一次
+
+        if total_files == 0:
+            await self.task_manager.update_task(
+                task_id,
+                progress=90.0,
+                processed_files=0,
+            )
+            return
 
         while True:
             # 从 Redis 获取文件任务状态
