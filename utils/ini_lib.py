@@ -146,7 +146,7 @@ def found_ini_files(dir_path: str) -> list[str]:
     - mod-info.txt
 
     :param dir_path: 目录路径
-    :return: INI文件路径列表
+    :return: 可翻译文本文件路径列表
     """
 
     # 验证目录是否存在

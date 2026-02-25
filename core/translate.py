@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 
 from utils.config import AI_API_KEY, AI_BASE_URL, AI_MODEL
 from utils.ini_lib import IniFile, read_file
+from utils.language import normalize_language_suffix, resolve_target_language
 
 # 基础文本键的正则（不包含语言后缀）
 BASE_TEXT_KEYS_REGEX = re.compile(
@@ -26,23 +27,8 @@ BASE_TEXT_KEYS_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-# 带语言后缀的文本键正则
-LOCALIZED_TEXT_KEYS_REGEX = re.compile(
-    r"(?i)^(?:"
-    r"description_[a-z]+|"
-    r"title_[a-z]+|"
-    r"displaydescription_[a-z]+|"
-    r"displayDescription_[a-z]+|"
-    r"text_[a-z]+|"
-    r"displayText_[a-z]+|"
-    r"isLockedAltMessage_[a-z]+|"
-    r"cannotPlaceMessage_[a-z]+|"
-    r"displayName_[a-z]+|"
-    r"displayNameShort_[a-z]+|"
-    r"showMessageToPlayer_[a-z]+|"
-    r"showMessageToAllPlayers_[a-z]+|"
-    r"action_\d+_(?:text|displayName)_[a-z]+"
-    r")$",
+LANGUAGE_SUFFIX_REGEX = re.compile(
+    r"^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})*$",
     re.IGNORECASE,
 )
 
@@ -56,14 +42,46 @@ def is_text_key_valid(key: str) -> bool:
     return BASE_TEXT_KEYS_REGEX.match(key) is not None
 
 
+def split_localized_text_key(key: str) -> tuple[str, str] | None:
+    """
+    将本地化键拆分为 (基础键, 语言后缀)。
+    例如：
+    - text_ru -> ("text", "ru")
+    - action_1_text_zh-CN -> ("action_1_text", "zh-cn")
+    """
+    if "_" not in key:
+        return None
+
+    key_parts = key.split("_")
+    if len(key_parts) < 2:
+        return None
+
+    # 兼容 text_ru / text_zh-cn / text_zh_cn 等后缀形式
+    for suffix_parts_count in range(1, len(key_parts)):
+        base_key = "_".join(key_parts[:-suffix_parts_count])
+        suffix = "_".join(key_parts[-suffix_parts_count:])
+        if not base_key or not suffix:
+            continue
+        if not is_text_key_valid(base_key):
+            continue
+        if not LANGUAGE_SUFFIX_REGEX.fullmatch(suffix):
+            continue
+        return base_key, suffix.lower()
+
+    return None
+
+
 def is_localized_text_key(key: str) -> bool:
     """检查是否为带语言后缀的文本键"""
-    return LOCALIZED_TEXT_KEYS_REGEX.match(key) is not None
+    return split_localized_text_key(key) is not None
 
 
 def localized_to_base_key(key: str) -> str:
     """将带语言后缀的键名还原为基础键名。"""
-    return re.sub(r"_[a-z]+$", "", key, flags=re.IGNORECASE)
+    localized = split_localized_text_key(key)
+    if not localized:
+        return key
+    return localized[0]
 
 
 def _extract_json_array(text: str) -> list[str]:
@@ -102,6 +120,8 @@ async def translate_tasks(
     if not original_texts:
         return {}
 
+    prompt_target_language, _ = resolve_target_language(target_language)
+
     if not AI_API_KEY:
         return {text: text for text in original_texts}
 
@@ -111,7 +131,7 @@ async def translate_tasks(
 
     prompt = f"""{translate_style}
 你是铁锈战争 mod 单位翻译专家。
-目标语言: {target_language}
+目标语言: {prompt_target_language}
 
 请按顺序翻译以下文本（保持条目顺序，不要解释）：
 {texts_numbered}
@@ -174,12 +194,14 @@ async def translate_file_preserve_structure(
     target_language: str = "中文",
 ) -> None:
     """
-    在保留文件结构的前提下，仅翻译允许的文本键。
+    在保留文件结构的前提下，为目标语言写入/更新本地化键。
     关键点：
     1. 不使用 configparser 重写全文件，避免破坏逻辑表达式。
     2. 三引号多行块原样保留。
-    3. 删除 *_xx 语言后缀键。
+    3. 保留基础键（如 text/description）与其他语种键，仅新增或更新目标语种键。
     """
+    prompt_target_language, target_suffix = resolve_target_language(target_language)
+
     content = read_file(file_path)
     line_ending = "\r\n" if "\r\n" in content else "\n"
     had_trailing_newline = content.endswith("\n") or content.endswith("\r")
@@ -233,17 +255,25 @@ async def translate_file_preserve_structure(
             in_triple_quote_block = True
 
     localized_values: dict[tuple[str, str], str] = {}
+    existing_target_keys: set[tuple[str, str]] = set()
+
     for item in parsed_lines:
         if item["kind"] != "kv":
             continue
         key = item["key"]
-        if not is_localized_text_key(key):
+        localized = split_localized_text_key(key)
+        if not localized:
             continue
+        base_key, suffix = localized
         localized_value = item["value"].strip()
         if not localized_value:
-            continue
-        base_key = localized_to_base_key(key)
-        localized_values.setdefault((item["section"], base_key), localized_value)
+            pass
+        else:
+            localized_values.setdefault((item["section"], base_key), localized_value)
+
+        suffix_primary = normalize_language_suffix(suffix, default_suffix=suffix)
+        if suffix_primary == target_suffix:
+            existing_target_keys.add((item["section"], base_key))
 
     translate_tasks_dict: dict[str, str] = {}
     for item in parsed_lines:
@@ -265,35 +295,68 @@ async def translate_file_preserve_structure(
         translations = await translate_tasks(
             translate_tasks_dict,
             translate_style=translate_style,
-            target_language=target_language,
+            target_language=prompt_target_language,
+        )
+
+    translated_by_pair: dict[tuple[str, str], str] = {}
+    for item in parsed_lines:
+        if item["kind"] != "kv":
+            continue
+        key = item["key"]
+        if not is_text_key_valid(key):
+            continue
+        source_text = item.get("source_text")
+        if not source_text:
+            continue
+        translated_value = translations.get(source_text, source_text)
+        translated_by_pair[(item["section"], key)] = _sanitize_single_line_value(
+            translated_value
         )
 
     output_lines: list[str] = []
+    inserted_target_keys: set[tuple[str, str]] = set()
+
     for item in parsed_lines:
         if item["kind"] != "kv":
             output_lines.append(item["raw"])
             continue
 
         key = item["key"]
+        section = item["section"]
 
-        # 删除语言后缀键，避免同义多语言字段污染
-        if is_localized_text_key(key):
-            continue
-
-        if is_text_key_valid(key):
-            source_text = item.get("source_text")
-            if source_text:
-                translated_value = translations.get(source_text, source_text)
-                new_value = _sanitize_single_line_value(translated_value)
+        localized = split_localized_text_key(key)
+        if localized:
+            base_key, suffix = localized
+            suffix_primary = normalize_language_suffix(suffix, default_suffix=suffix)
+            if suffix_primary == target_suffix:
+                translated_value = translated_by_pair.get((section, base_key))
+                if translated_value:
+                    output_lines.append(
+                        f"{item['indent']}{key}{item['pre']}{item['sep']}{item['post']}{translated_value}"
+                    )
+                else:
+                    output_lines.append(item["raw"])
             else:
-                new_value = item["value"]
-
-            output_lines.append(
-                f"{item['indent']}{key}{item['pre']}{item['sep']}{item['post']}{new_value}"
-            )
+                output_lines.append(item["raw"])
             continue
 
         output_lines.append(item["raw"])
+
+        if not is_text_key_valid(key):
+            continue
+
+        pair = (section, key)
+        translated_value = translated_by_pair.get(pair)
+        if not translated_value:
+            continue
+        if pair in existing_target_keys or pair in inserted_target_keys:
+            continue
+
+        localized_key = f"{key}_{target_suffix}"
+        output_lines.append(
+            f"{item['indent']}{localized_key}{item['pre']}{item['sep']}{item['post']}{translated_value}"
+        )
+        inserted_target_keys.add(pair)
 
     new_content = line_ending.join(output_lines)
     if had_trailing_newline:
@@ -316,58 +379,53 @@ async def translate_inifile(
     target_language: str = "中文",
 ) -> IniFile:
     """
-    翻译单个ini文件
+    翻译单个 ini 文件：
+    - 保留基础键原文
+    - 仅新增/更新目标语言后缀键（如 text_zh, description_ru）
     """
-    # 第一步：预处理 - 如果基础键为空，从其他语言版本复制
+    prompt_target_language, target_suffix = resolve_target_language(target_language)
+
+    # 先汇总各基础键可回退使用的本地化文本
+    localized_values: dict[tuple[str, str], str] = {}
     for section in inifile.data.keys():
-        keys_to_check = list(inifile.data[section].keys())
+        for key, value in inifile.data[section].items():
+            localized = split_localized_text_key(key)
+            if not localized:
+                continue
+            base_key, _ = localized
+            localized_value = value.strip()
+            if localized_value:
+                localized_values.setdefault((section, base_key), localized_value)
 
-        for key in keys_to_check:
-            if is_text_key_valid(key):
-                base_value = inifile.data[section].get(key, "").strip()
-
-                # 如果基础键为空，尝试从其他语言版本获取
-                if not base_value:
-                    for localized_key in keys_to_check:
-                        if localized_key.lower().startswith(key.lower() + "_"):
-                            localized_value = (
-                                inifile.data[section].get(localized_key, "").strip()
-                            )
-                            if localized_value:
-                                inifile.data[section][key] = localized_value
-                                break
-
-    # 第二步：收集需要翻译的文本
-    text_keys: list[tuple[str, str]] = []
-    translate_tasks_dict = {}
+    # 收集待翻译文本（按基础键），并计算目标语言键名
+    text_keys: list[tuple[str, str, str, str]] = []
+    translate_tasks_dict: dict[str, str] = {}
 
     for section in inifile.data.keys():
         for key in inifile.data[section]:
-            if is_text_key_valid(key):
-                text = inifile.data[section][key].strip()
-                if text:
-                    text_keys.append((section, key))
-                    translate_tasks_dict[text] = "translation key"
+            if not is_text_key_valid(key):
+                continue
+            source_text = inifile.data[section][key].strip()
+            if not source_text:
+                source_text = localized_values.get((section, key), "")
+            if not source_text:
+                continue
 
-    # 第三步：翻译所有文本
+            localized_key = f"{key}_{target_suffix}"
+            text_keys.append((section, key, localized_key, source_text))
+            translate_tasks_dict[source_text] = "translation key"
+
+    # 翻译并写入目标语言键
     if translate_tasks_dict:
         translations = await translate_tasks(
-            translate_tasks_dict, translate_style, target_language
+            translate_tasks_dict,
+            translate_style,
+            prompt_target_language,
         )
 
-        for section, key in text_keys:
-            original_text = inifile.data[section][key]
-            if original_text in translations:
-                inifile.data[section][key] = translations[original_text]
-
-    # 第四步：删除所有带语言后缀的键
-    for section in inifile.data.keys():
-        keys_to_delete = []
-        for key in inifile.data[section]:
-            if is_localized_text_key(key):
-                keys_to_delete.append(key)
-
-        for key in keys_to_delete:
-            del inifile.data[section][key]
+        for section, _base_key, localized_key, source_text in text_keys:
+            translated = translations.get(source_text)
+            if translated is not None:
+                inifile.data[section][localized_key] = translated
 
     return inifile
