@@ -6,7 +6,11 @@ from openai import AsyncOpenAI
 
 from utils.config import AI_API_KEY, AI_BASE_URL, AI_MODEL
 from utils.ini_lib import IniFile, read_file
-from utils.language import normalize_language_suffix, resolve_target_language
+from utils.language import (
+    normalize_language_suffix,
+    resolve_target_language,
+    resolve_target_language_suffixes,
+)
 
 # 基础文本键的正则（不包含语言后缀）
 BASE_TEXT_KEYS_REGEX = re.compile(
@@ -201,6 +205,7 @@ async def translate_file_preserve_structure(
     3. 保留基础键（如 text/description）与其他语种键，仅新增或更新目标语种键。
     """
     prompt_target_language, target_suffix = resolve_target_language(target_language)
+    target_suffixes = resolve_target_language_suffixes(target_language)
 
     content = read_file(file_path)
     line_ending = "\r\n" if "\r\n" in content else "\n"
@@ -255,7 +260,7 @@ async def translate_file_preserve_structure(
             in_triple_quote_block = True
 
     localized_values: dict[tuple[str, str], str] = {}
-    existing_target_keys: set[tuple[str, str]] = set()
+    existing_suffixes_by_pair: dict[tuple[str, str], set[str]] = {}
 
     for item in parsed_lines:
         if item["kind"] != "kv":
@@ -265,15 +270,13 @@ async def translate_file_preserve_structure(
         if not localized:
             continue
         base_key, suffix = localized
+        pair = (item["section"], base_key)
+        existing_suffixes_by_pair.setdefault(pair, set()).add(suffix)
         localized_value = item["value"].strip()
         if not localized_value:
             pass
         else:
             localized_values.setdefault((item["section"], base_key), localized_value)
-
-        suffix_primary = normalize_language_suffix(suffix, default_suffix=suffix)
-        if suffix_primary == target_suffix:
-            existing_target_keys.add((item["section"], base_key))
 
     translate_tasks_dict: dict[str, str] = {}
     for item in parsed_lines:
@@ -314,7 +317,7 @@ async def translate_file_preserve_structure(
         )
 
     output_lines: list[str] = []
-    inserted_target_keys: set[tuple[str, str]] = set()
+    inserted_target_key_suffixes: set[tuple[tuple[str, str], str]] = set()
 
     for item in parsed_lines:
         if item["kind"] != "kv":
@@ -349,14 +352,20 @@ async def translate_file_preserve_structure(
         translated_value = translated_by_pair.get(pair)
         if not translated_value:
             continue
-        if pair in existing_target_keys or pair in inserted_target_keys:
-            continue
 
-        localized_key = f"{key}_{target_suffix}"
-        output_lines.append(
-            f"{item['indent']}{localized_key}{item['pre']}{item['sep']}{item['post']}{translated_value}"
-        )
-        inserted_target_keys.add(pair)
+        existing_suffixes = existing_suffixes_by_pair.get(pair, set())
+        for suffix in target_suffixes:
+            if suffix in existing_suffixes:
+                continue
+            suffix_key = (pair, suffix)
+            if suffix_key in inserted_target_key_suffixes:
+                continue
+
+            localized_key = f"{key}_{suffix}"
+            output_lines.append(
+                f"{item['indent']}{localized_key}{item['pre']}{item['sep']}{item['post']}{translated_value}"
+            )
+            inserted_target_key_suffixes.add(suffix_key)
 
     new_content = line_ending.join(output_lines)
     if had_trailing_newline:
@@ -383,7 +392,8 @@ async def translate_inifile(
     - 保留基础键原文
     - 仅新增/更新目标语言后缀键（如 text_zh, description_ru）
     """
-    prompt_target_language, target_suffix = resolve_target_language(target_language)
+    prompt_target_language, _target_suffix = resolve_target_language(target_language)
+    target_suffixes = resolve_target_language_suffixes(target_language)
 
     # 先汇总各基础键可回退使用的本地化文本
     localized_values: dict[tuple[str, str], str] = {}
@@ -398,7 +408,7 @@ async def translate_inifile(
                 localized_values.setdefault((section, base_key), localized_value)
 
     # 收集待翻译文本（按基础键），并计算目标语言键名
-    text_keys: list[tuple[str, str, str, str]] = []
+    text_keys: list[tuple[str, str, str]] = []
     translate_tasks_dict: dict[str, str] = {}
 
     for section in inifile.data.keys():
@@ -411,8 +421,7 @@ async def translate_inifile(
             if not source_text:
                 continue
 
-            localized_key = f"{key}_{target_suffix}"
-            text_keys.append((section, key, localized_key, source_text))
+            text_keys.append((section, key, source_text))
             translate_tasks_dict[source_text] = "translation key"
 
     # 翻译并写入目标语言键
@@ -423,9 +432,11 @@ async def translate_inifile(
             prompt_target_language,
         )
 
-        for section, _base_key, localized_key, source_text in text_keys:
+        for section, base_key, source_text in text_keys:
             translated = translations.get(source_text)
             if translated is not None:
-                inifile.data[section][localized_key] = translated
+                for suffix in target_suffixes:
+                    localized_key = f"{base_key}_{suffix}"
+                    inifile.data[section][localized_key] = translated
 
     return inifile

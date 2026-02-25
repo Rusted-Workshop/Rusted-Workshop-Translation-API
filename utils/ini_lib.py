@@ -143,6 +143,7 @@ def found_ini_files(dir_path: str) -> list[str]:
     - .ini
     - .template
     - .un
+    - .fx
     - mod-info.txt
 
     :param dir_path: 目录路径
@@ -166,6 +167,7 @@ def found_ini_files(dir_path: str) -> list[str]:
                 file_lower.endswith(".ini")
                 or file_lower.endswith(".template")
                 or file_lower.endswith(".un")
+                or file_lower.endswith(".fx")
                 or file_lower == "mod-info.txt"
             ):
                 ini_files_paths.append(os.path.join(root, file))

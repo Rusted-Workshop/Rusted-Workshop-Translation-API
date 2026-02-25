@@ -3,7 +3,7 @@
 
 流程：
 1. 解压 rwmod
-2. 扫描 .ini/.template/.un/mod-info.txt
+2. 扫描 .ini/.template/.un/.fx/mod-info.txt
 3. 执行结构保留式翻译替换
 4. 校验语法安全（避免 <= / >= 被破坏、三引号不闭合）
 5. 重新打包为 translated.rwmod

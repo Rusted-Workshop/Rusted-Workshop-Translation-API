@@ -18,7 +18,7 @@ class RWMod:
             pass
 
         if os.path.isdir(path):
-            print(f"[{self.uuid}] 扫描可翻译文本文件（ini/template/un/mod-info.txt）")
+            print(f"[{self.uuid}] 扫描可翻译文本文件（ini/template/un/fx/mod-info.txt）")
 
             for file_path in found_ini_files(path):
                 try:
