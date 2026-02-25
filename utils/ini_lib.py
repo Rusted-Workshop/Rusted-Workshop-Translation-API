@@ -139,7 +139,11 @@ def auto_fix(ini_file_path: str) -> str:
 
 def found_ini_files(dir_path: str) -> list[str]:
     """
-    查找目录下所有的INI文件、mod-info.txt和.template文件
+    查找目录下所有可翻译文本文件：
+    - .ini
+    - .template
+    - .un
+    - mod-info.txt
 
     :param dir_path: 目录路径
     :return: INI文件路径列表
@@ -153,14 +157,16 @@ def found_ini_files(dir_path: str) -> list[str]:
     if not os.path.isdir(dir_path):
         raise NotADirectoryError(f"The path {dir_path} is not a directory.")
 
-    # 遍历目录，查找所有的INI、mod-info.txt和.template文件
+    # 遍历目录，查找所有可翻译文本文件
     ini_files_paths = []
     for root, dirs, files in os.walk(dir_path):
         for file in files:
+            file_lower = file.lower()
             if (
-                file.endswith(".ini")
-                or file.endswith(".template")
-                or file == "mod-info.txt"
+                file_lower.endswith(".ini")
+                or file_lower.endswith(".template")
+                or file_lower.endswith(".un")
+                or file_lower == "mod-info.txt"
             ):
                 ini_files_paths.append(os.path.join(root, file))
 
