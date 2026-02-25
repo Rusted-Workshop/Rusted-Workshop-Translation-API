@@ -61,6 +61,14 @@ DEFAULT_PROMPT_LANGUAGE_BY_SUFFIX: dict[str, str] = {
     "ko": "韩文",
 }
 
+LANGUAGE_SUFFIX_VARIANTS: dict[str, list[str]] = {
+    "zh": ["zh", "zh_cn", "cn"],
+    "ru": ["ru", "ru_ru"],
+    "en": ["en", "en_us"],
+    "ja": ["ja", "ja_jp"],
+    "ko": ["ko", "ko_kr"],
+}
+
 
 def _normalize_token(text: str) -> str:
     return re.sub(r"\s+", "", text).lower()
@@ -102,3 +110,25 @@ def resolve_target_language(target_language: str) -> tuple[str, str]:
     suffix = normalize_language_suffix(language)
     prompt_language = language or DEFAULT_PROMPT_LANGUAGE_BY_SUFFIX.get(suffix, "中文")
     return prompt_language, suffix
+
+
+def resolve_target_language_suffixes(target_language: str) -> list[str]:
+    """
+    返回目标语言可写入的后缀列表（按优先级，去重）。
+    例如：
+    - zh-CN -> ["zh", "zh_cn", "cn"]
+    - ru -> ["ru", "ru_ru"]
+    - pt-BR -> ["pt"]
+    """
+    _prompt_language, suffix = resolve_target_language(target_language)
+    variants = LANGUAGE_SUFFIX_VARIANTS.get(suffix, [suffix])
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in variants:
+        normalized = item.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
