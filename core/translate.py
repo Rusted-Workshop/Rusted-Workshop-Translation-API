@@ -108,6 +108,17 @@ def _sanitize_single_line_value(value: str) -> str:
     return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
 
 
+def should_skip_localized_generation(key: str, value: str) -> bool:
+    """
+    判断某个基础文本键是否应跳过生成本地化后缀键。
+
+    目前规则：
+    - `i:` 开头的值是引擎内置文本资源键，不应再生成 `*_zh` / `*_ru`
+    """
+    _ = key
+    return value.strip().startswith("i:")
+
+
 async def translate_tasks(
     tasks: dict,
     translate_style: str,
@@ -137,6 +148,11 @@ async def translate_tasks(
 你是铁锈战争 mod 单位翻译专家。
 目标语言: {prompt_target_language}
 
+翻译规则：
+1. 严格保留所有变量、占位符、表达式、转义和标签的原样内容，例如 `${{...}}`、`%{{...}}`、`\\n`、`[tag]`
+2. 变量名区分大小写，必须逐字符原样保留，禁止改名、纠正大小写、补全、简化或翻译变量名
+3. 只翻译自然语言文本，不要改动代码样式内容、数字公式、键名引用或占位符内部内容
+
 请按顺序翻译以下文本（保持条目顺序，不要解释）：
 {texts_numbered}
 
@@ -157,7 +173,7 @@ async def translate_tasks(
                     messages=[
                         {
                             "role": "system",
-                            "content": "你是专业翻译助手，严格输出 JSON 数组。",
+                            "content": "你是专业翻译助手，严格输出 JSON 数组。保留所有占位符和变量原文，变量名区分大小写，不得改动。",
                         },
                         {"role": "user", "content": prompt},
                     ],
@@ -290,6 +306,8 @@ async def translate_file_preserve_structure(
         if not source_text:
             source_text = localized_values.get((item["section"], key), "")
         if source_text:
+            if should_skip_localized_generation(key, source_text):
+                continue
             item["source_text"] = source_text
             translate_tasks_dict[source_text] = "translation key"
 
@@ -419,6 +437,8 @@ async def translate_inifile(
             if not source_text:
                 source_text = localized_values.get((section, key), "")
             if not source_text:
+                continue
+            if should_skip_localized_generation(key, source_text):
                 continue
 
             text_keys.append((section, key, source_text))
