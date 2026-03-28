@@ -5,6 +5,7 @@ from utils.config import (
     REDIS_HOST,
     REDIS_PASSWORD,
     REDIS_PORT,
+    REDIS_USE_SSL,
     REDIS_USERNAME,
 )
 
@@ -17,6 +18,6 @@ def get_redis_connection() -> Redis:
         db=int(REDIS_DB),
         username=REDIS_USERNAME if REDIS_USERNAME else None,
         password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+        ssl=REDIS_USE_SSL,
         decode_responses=True,
     )
-

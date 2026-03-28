@@ -33,6 +33,7 @@ REDIS_PORT = os.environ.get("REDIS_PORT", "6379")
 REDIS_DB = os.environ.get("REDIS_DB", "0")
 REDIS_USERNAME = os.environ.get("REDIS_USERNAME", "")
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "")
+REDIS_USE_SSL = os.environ.get("REDIS_USE_SSL", "false").lower() in ("true", "1", "yes")
 
 # S3 配置
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
