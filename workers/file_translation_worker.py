@@ -34,9 +34,14 @@ class FileTranslationWorker:
         # 增加并发数：每个 worker 可以同时处理多个文件
         prefetch_count = int(os.getenv("FILE_WORKER_PREFETCH", "3"))
 
-        self.rabbitmq.consume_messages(
-            self.QUEUE_NAME, self.process_message, prefetch_count=prefetch_count
-        )
+        try:
+            self.rabbitmq.consume_messages(
+                self.QUEUE_NAME, self.process_message, prefetch_count=prefetch_count
+            )
+        except KeyboardInterrupt:
+            print("File Translation Worker 收到停止信号，准备退出...")
+        finally:
+            self.rabbitmq.close()
 
     def process_message(
         self,
@@ -60,6 +65,16 @@ class FileTranslationWorker:
             file_id = message.file_id
             file_path = message.file_path
 
+            # 丢弃旧批次消息，避免重启后继续消费失效的工作目录任务
+            is_stale = asyncio.run(self._is_stale_file_message(message))
+            if is_stale:
+                self.rabbitmq.ack_message(method.delivery_tag)
+                print(
+                    f"[{task_id}:{file_id}] 跳过旧批次文件消息: {file_path} "
+                    f"(run_id={message.run_id})"
+                )
+                return
+
             print(f"[{task_id}:{file_id}] 开始翻译文件: {file_path}")
 
             # 使用 asyncio.run() 创建独立的 event loop 并正确清理
@@ -76,6 +91,26 @@ class FileTranslationWorker:
             # 拒绝消息，不重新入队
             # 注意：失败状态已在 _process_file_async 的 except 块中更新
             self.rabbitmq.nack_message(method.delivery_tag, requeue=False)
+
+    async def _is_stale_file_message(self, message: FileTranslationMessage) -> bool:
+        cache_service = TranslationCache()
+        try:
+            run_key = f"task:{message.task_id}:run_id"
+            current_run_id = await cache_service.redis.get(run_key)
+            if not current_run_id:
+                # 没有活动 run_id 记录时：
+                # - 若工作目录已不存在，视为历史残留消息，直接丢弃
+                # - 否则不做丢弃判断，继续兼容旧流程
+                if not os.path.exists(message.work_dir):
+                    return True
+                return False
+            if isinstance(current_run_id, bytes):
+                current_run_id = current_run_id.decode("utf-8")
+            current_run_id = str(current_run_id).strip()
+            message_run_id = str(message.run_id or "").strip()
+            return message_run_id != current_run_id
+        finally:
+            await cache_service.redis.aclose()
 
     async def _process_file_async(self, message: FileTranslationMessage):
         """
@@ -168,11 +203,14 @@ class FileTranslationWorker:
             error_message: 错误信息
         """
         status_key = f"file_task:{task_id}:{file_id}:status"
-        await cache_service.redis.set(status_key, status.value, ex=3600)
+        status_ttl_seconds = int(os.getenv("FILE_TASK_STATUS_TTL_SECONDS", "21600"))
+        await cache_service.redis.set(status_key, status.value, ex=status_ttl_seconds)
 
         if error_message:
             error_key = f"file_task:{task_id}:{file_id}:error"
-            await cache_service.redis.set(error_key, error_message, ex=3600)
+            await cache_service.redis.set(
+                error_key, error_message, ex=status_ttl_seconds
+            )
 
 if __name__ == "__main__":
     worker = FileTranslationWorker()

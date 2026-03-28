@@ -61,15 +61,6 @@ DEFAULT_PROMPT_LANGUAGE_BY_SUFFIX: dict[str, str] = {
     "ko": "韩文",
 }
 
-LANGUAGE_SUFFIX_VARIANTS: dict[str, list[str]] = {
-    "zh": ["zh", "zh_cn", "cn"],
-    "ru": ["ru", "ru_ru"],
-    "en": ["en", "en_us"],
-    "ja": ["ja", "ja_jp"],
-    "ko": ["ko", "ko_kr"],
-}
-
-
 def _normalize_token(text: str) -> str:
     return re.sub(r"\s+", "", text).lower()
 
@@ -116,12 +107,16 @@ def resolve_target_language_suffixes(target_language: str) -> list[str]:
     """
     返回目标语言可写入的后缀列表（按优先级，去重）。
     例如：
-    - zh-CN -> ["zh", "zh_cn", "cn"]
-    - ru -> ["ru", "ru_ru"]
+    - zh-CN -> ["zh"]
+    - ru -> ["ru"]
     - pt-BR -> ["pt"]
+
+    注意：
+    - 写入时仅使用主语言码，避免生成 text_cn / text_zh_cn 这类平台不识别的历史键。
+    - 读取时仍兼容旧格式；相关兼容逻辑在键名解析与 normalize_language_suffix 中处理。
     """
     _prompt_language, suffix = resolve_target_language(target_language)
-    variants = LANGUAGE_SUFFIX_VARIANTS.get(suffix, [suffix])
+    variants = [suffix]
 
     ordered: list[str] = []
     seen: set[str] = set()

@@ -4,10 +4,12 @@ RabbitMQ 消息队列服务
 
 import json
 import os
+import time
 from typing import Callable, Optional
 
 import pika
 from pika.adapters.blocking_connection import BlockingChannel
+from pika.exceptions import AMQPConnectionError, AMQPError, StreamLostError
 
 
 class RabbitMQService:
@@ -31,6 +33,7 @@ class RabbitMQService:
 
     def connect(self):
         """建立连接"""
+        self.close()
         credentials = pika.PlainCredentials(self.username, self.password)
         parameters = pika.ConnectionParameters(
             host=self.host,
@@ -45,8 +48,21 @@ class RabbitMQService:
 
     def close(self):
         """关闭连接"""
-        if self.connection and not self.connection.is_closed:
-            self.connection.close()
+        try:
+            if self.channel and self.channel.is_open:
+                self.channel.close()
+        except AMQPError:
+            pass
+        finally:
+            self.channel = None
+
+        try:
+            if self.connection and not self.connection.is_closed:
+                self.connection.close()
+        except AMQPError:
+            pass
+        finally:
+            self.connection = None
 
     def declare_queue(self, queue_name: str, durable: bool = True):
         """声明队列"""
@@ -88,7 +104,11 @@ class RabbitMQService:
             )
 
     def consume_messages(
-        self, queue_name: str, callback: Callable, prefetch_count: int = 1
+        self,
+        queue_name: str,
+        callback: Callable,
+        prefetch_count: int = 1,
+        exclusive: bool = False,
     ):
         """
         消费队列消息
@@ -98,17 +118,41 @@ class RabbitMQService:
             callback: 消息处理回调函数
             prefetch_count: 预取消息数量
         """
-        if not self.channel:
-            self.connect()
+        reconnect_delay = float(os.getenv("RABBITMQ_RECONNECT_DELAY_SECONDS", "5"))
 
-        if self.channel:
-            self.channel.basic_qos(prefetch_count=prefetch_count)
-            self.channel.basic_consume(
-                queue=queue_name, on_message_callback=callback, auto_ack=False
-            )
+        while True:
+            try:
+                if not self.channel or self.channel.is_closed:
+                    self.connect()
 
-            print(f"开始监听队列: {queue_name}")
-            self.channel.start_consuming()
+                if not self.channel:
+                    raise AMQPConnectionError("RabbitMQ channel unavailable")
+
+                self.channel.basic_qos(prefetch_count=prefetch_count)
+                self.channel.basic_consume(
+                    queue=queue_name,
+                    on_message_callback=callback,
+                    auto_ack=False,
+                    exclusive=exclusive,
+                )
+
+                print(f"开始监听队列: {queue_name}")
+                self.channel.start_consuming()
+                return
+            except KeyboardInterrupt:
+                print(f"收到中断信号，停止监听队列: {queue_name}")
+                try:
+                    if self.channel and self.channel.is_open:
+                        self.channel.stop_consuming()
+                finally:
+                    self.close()
+                raise
+            except (AMQPConnectionError, StreamLostError, AMQPError) as exc:
+                print(
+                    f"RabbitMQ 连接中断，{reconnect_delay:g} 秒后重连队列 {queue_name}: {exc}"
+                )
+                self.close()
+                time.sleep(reconnect_delay)
 
     def ack_message(self, delivery_tag):
         """确认消息"""

@@ -43,3 +43,4 @@ class FileTranslationMessage(BaseModel):
     work_dir: str = Field(..., description="工作目录")
     translate_style: str = Field(..., description="翻译风格")
     target_language: str = Field(default="中文", description="目标语言")
+    run_id: Optional[str] = Field(default=None, description="协调器运行批次ID")
