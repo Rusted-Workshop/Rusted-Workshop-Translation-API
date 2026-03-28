@@ -4,6 +4,7 @@ RabbitMQ 消息队列服务
 
 import json
 import os
+import ssl
 import time
 from typing import Callable, Optional
 
@@ -22,12 +23,14 @@ class RabbitMQService:
         username: str = "guest",
         password: str = "guest",
         virtual_host: str = "/",
+        use_ssl: bool = False,
     ):
         self.host = host
         self.port = port
         self.username = username
         self.password = password
         self.virtual_host = virtual_host
+        self.use_ssl = use_ssl
         self.connection: Optional[pika.BlockingConnection] = None
         self.channel: Optional[BlockingChannel] = None
 
@@ -35,6 +38,10 @@ class RabbitMQService:
         """建立连接"""
         self.close()
         credentials = pika.PlainCredentials(self.username, self.password)
+        ssl_options = None
+        if self.use_ssl:
+            ssl_context = ssl.create_default_context()
+            ssl_options = pika.SSLOptions(ssl_context)
         parameters = pika.ConnectionParameters(
             host=self.host,
             port=self.port,
@@ -42,6 +49,7 @@ class RabbitMQService:
             credentials=credentials,
             heartbeat=600,
             blocked_connection_timeout=300,
+            ssl_options=ssl_options,
         )
         self.connection = pika.BlockingConnection(parameters)
         self.channel = self.connection.channel()
@@ -173,4 +181,5 @@ def get_rabbitmq_service() -> RabbitMQService:
         username=os.getenv("RABBITMQ_USERNAME", "guest"),
         password=os.getenv("RABBITMQ_PASSWORD", "guest"),
         virtual_host=os.getenv("RABBITMQ_VHOST", "/"),
+        use_ssl=os.getenv("RABBITMQ_USE_SSL", "false").lower() in ("true", "1", "yes"),
     )
