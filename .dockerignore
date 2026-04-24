@@ -1,0 +1,59 @@
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+.eggs
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.venv
+venv
+env
+
+# uv
+.uv-cache
+
+# IDE
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Logs / runtime
+logs
+*.log
+artifacts
+
+# Secrets & local env (永远不要打进镜像)
+.env
+.env.*
+!.env.example
+
+# Large test assets (47MB 的 mod 文件不应进镜像)
+*.rwmod
+tmp_*
+
+# Docs & CI
+docs
+.github
+*.md
+!README.md
+
+# Tests
+tests
+
+# Docker 本身
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# OS
+Thumbs.db

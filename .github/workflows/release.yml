@@ -1,0 +1,225 @@
+name: Build & Release Docker Images
+
+# ---------------------------------------------------------------------------
+# 触发时机：
+#   1. push tag  v*.*.*      → 正式版（会创建 GitHub Release）
+#   2. push tag  v*.*.*-*    → 预发布（alpha/beta/rc，标记为 prerelease）
+#   3. push main/master      → 仅构建 & 推送 :edge 标签，不发 Release
+#   4. workflow_dispatch     → 手动触发，可指定 tag
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'v*.*.*-*'
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to publish (e.g. v1.2.3). Leave empty to use branch SHA.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write       # 创建 Release
+  packages: write       # 推送 GHCR
+  id-token: write       # OIDC（未来扩展用）
+
+env:
+  REGISTRY: ghcr.io
+  # 镜像命名空间（全小写），GHCR 会放在 ghcr.io/<owner>/<repo>/<component>
+  IMAGE_NAMESPACE: ${{ github.repository }}
+
+jobs:
+  # =========================================================================
+  # Job 1: 矩阵构建 4 个镜像
+  # =========================================================================
+  build:
+    name: Build ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: api
+            dockerfile: Dockerfile.api
+          - component: coordinator
+            dockerfile: Dockerfile.coordinator
+          - component: file-worker
+            dockerfile: Dockerfile.file-worker
+          - component: cleanup
+            dockerfile: Dockerfile.cleanup
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase image namespace
+        id: ns
+        run: echo "ns=$(echo '${{ env.IMAGE_NAMESPACE }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}/${{ matrix.component }}
+          tags: |
+            # 语义化版本标签（仅 tag 触发）
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # 分支构建 → edge
+            type=edge,branch=main
+            type=edge,branch=master
+            # 手动触发
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
+            # 提交 SHA（短）
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=Rusted Workshop Translation - ${{ matrix.component }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,scope=${{ matrix.component }},mode=max
+          provenance: false
+
+  # =========================================================================
+  # Job 2: 生成 / 发布 GitHub Release（仅 tag 触发）
+  # =========================================================================
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 用于生成 changelog
+
+      - name: Lowercase image namespace
+        id: ns
+        run: echo "ns=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Extract version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate changelog from git
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 "${{ steps.ver.outputs.tag }}^" 2>/dev/null || echo "")
+          {
+            echo "changelog<<__EOF__"
+            if [ -n "$PREV_TAG" ]; then
+              echo "### Changes since ${PREV_TAG}"
+              echo ""
+              git log --pretty=format:'- %s (%h)' "${PREV_TAG}..${{ steps.ver.outputs.tag }}"
+            else
+              echo "### Initial release"
+              echo ""
+              git log --pretty=format:'- %s (%h)' "${{ steps.ver.outputs.tag }}"
+            fi
+            echo ""
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render release notes
+        id: notes
+        env:
+          NS: ${{ steps.ns.outputs.ns }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          cat > release_notes.md <<EOF
+          # Rusted Workshop Translation API — ${TAG}
+
+          本次发布包含 **4 个 Docker 镜像**，已推送至 GitHub Container Registry (GHCR)。
+
+          ## 📦 Images
+
+          | Component    | Image                                                           | Role                             |
+          |--------------|-----------------------------------------------------------------|----------------------------------|
+          | API          | \`ghcr.io/${NS}/api:${VERSION}\`                                | HTTP 入口（FastAPI，端口 8001）   |
+          | Coordinator  | \`ghcr.io/${NS}/coordinator:${VERSION}\`                        | 任务协调与恢复                    |
+          | File Worker  | \`ghcr.io/${NS}/file-worker:${VERSION}\`                        | 文件翻译执行（可水平扩展）         |
+          | Cleanup      | \`ghcr.io/${NS}/cleanup:${VERSION}\`                            | 工作目录定期清理                  |
+
+          所有镜像均提供 \`linux/amd64\` 与 \`linux/arm64\` 两个架构。
+
+          ## 🚀 Pull
+
+          \`\`\`bash
+          docker pull ghcr.io/${NS}/api:${VERSION}
+          docker pull ghcr.io/${NS}/coordinator:${VERSION}
+          docker pull ghcr.io/${NS}/file-worker:${VERSION}
+          docker pull ghcr.io/${NS}/cleanup:${VERSION}
+          \`\`\`
+
+          ## 🧩 Quick Deploy
+
+          完整的 compose 示例见仓库中的 [\`docker-compose.prod.yml\`](./docker-compose.prod.yml)；环境变量模板见 [\`.env.example\`](./.env.example)。
+
+          \`\`\`bash
+          export IMAGE_TAG=${VERSION}
+          docker compose -f docker-compose.prod.yml --env-file .env up -d
+          \`\`\`
+
+          ## 📝 Changelog
+
+          ${CHANGELOG}
+
+          ---
+
+          > Full deployment guide: see [\`RELEASE.md\`](./RELEASE.md)
+          EOF
+          echo "path=release_notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          body_path: release_notes.md
+          prerelease: ${{ steps.ver.outputs.prerelease == 'true' }}
+          generate_release_notes: false
+          files: |
+            docker-compose.prod.yml
+            .env.example
+            RELEASE.md

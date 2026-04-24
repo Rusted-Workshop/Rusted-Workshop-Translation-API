@@ -1,0 +1,199 @@
+# ---------------------------------------------------------------------------
+# Production docker-compose (pull images from GHCR, no local build)
+#
+# Usage:
+#   export IMAGE_TAG=v1.0.0            # or leave unset to use 'latest'
+#   export IMAGE_NAMESPACE=rusted-workshop/rusted-workshop-translation-api
+#   cp .env.example .env && vim .env   # 填好所有凭据
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d
+#
+# 升级：
+#   export IMAGE_TAG=v1.1.0
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+# ---------------------------------------------------------------------------
+
+x-image-registry: &registry "ghcr.io/${IMAGE_NAMESPACE:-rusted-workshop/rusted-workshop-translation-api}"
+x-image-tag:      &tag      "${IMAGE_TAG:-latest}"
+
+x-common-env: &common-env
+  # Postgres
+  POSTGRES_HOST:     ${POSTGRES_HOST:-postgres}
+  POSTGRES_PORT:     ${POSTGRES_PORT:-5432}
+  POSTGRES_USER:     ${POSTGRES_USER}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  POSTGRES_DB:       ${POSTGRES_DB}
+  DATABASE_URL:      ${DATABASE_URL}
+  # Redis
+  REDIS_HOST:        ${REDIS_HOST:-redis}
+  REDIS_PORT:        ${REDIS_PORT:-6379}
+  REDIS_PASSWORD:    ${REDIS_PASSWORD}
+  REDIS_DB:          ${REDIS_DB:-0}
+  REDIS_USE_SSL:     ${REDIS_USE_SSL:-false}
+  # RabbitMQ
+  RABBITMQ_HOST:     ${RABBITMQ_HOST:-rabbitmq}
+  RABBITMQ_PORT:     ${RABBITMQ_PORT:-5672}
+  RABBITMQ_USERNAME: ${RABBITMQ_USERNAME}
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+  RABBITMQ_VHOST:    ${RABBITMQ_VHOST:-/}
+  RABBITMQ_USE_SSL:  ${RABBITMQ_USE_SSL:-false}
+  # S3 / MinIO
+  AWS_ENDPOINT_URL:      ${AWS_ENDPOINT_URL:-http://minio:9000}
+  AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+  AWS_REGION:            ${AWS_REGION:-us-east-1}
+  S3_BUCKET:             ${S3_BUCKET}
+  # OpenAI
+  OPENAI_API_KEY:  ${OPENAI_API_KEY}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  OPENAI_MODEL:    ${OPENAI_MODEL:-gpt-4o-mini}
+
+services:
+  # -------------------- App services --------------------
+  api:
+    image: "${REGISTRY:-ghcr.io/rusted-workshop/rusted-workshop-translation-api}/api:${IMAGE_TAG:-latest}"
+    restart: unless-stopped
+    depends_on:
+      postgres:  { condition: service_healthy }
+      redis:     { condition: service_healthy }
+      rabbitmq:  { condition: service_healthy }
+      minio:     { condition: service_started }
+    environment:
+      <<: *common-env
+    ports:
+      - "${API_PORT:-8001}:8001"
+    networks: [backbone]
+
+  coordinator:
+    image: "${REGISTRY:-ghcr.io/rusted-workshop/rusted-workshop-translation-api}/coordinator:${IMAGE_TAG:-latest}"
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    environment:
+      <<: *common-env
+    volumes:
+      - translation_work:/tmp/translation_work
+    networks: [backbone]
+
+  file-worker:
+    image: "${REGISTRY:-ghcr.io/rusted-workshop/rusted-workshop-translation-api}/file-worker:${IMAGE_TAG:-latest}"
+    restart: unless-stopped
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    environment:
+      <<: *common-env
+    volumes:
+      - translation_work:/tmp/translation_work
+    deploy:
+      replicas: ${FILE_WORKER_REPLICAS:-4}
+    networks: [backbone]
+
+  cleanup:
+    image: "${REGISTRY:-ghcr.io/rusted-workshop/rusted-workshop-translation-api}/cleanup:${IMAGE_TAG:-latest}"
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      RETENTION_DAYS: ${RETENTION_DAYS:-7}
+      CHECK_INTERVAL: ${CHECK_INTERVAL:-3600}
+      WORK_DIR:       /tmp/translation_work
+    volumes:
+      - translation_work:/tmp/translation_work
+    networks: [backbone]
+
+  # -------------------- Infrastructure --------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [backbone]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [backbone]
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"    # 管理 UI，建议只绑 127.0.0.1
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks: [backbone]
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${AWS_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [backbone]
+
+  # 仅在首次启动时自动创建 bucket；正常情况下运行一次后就会退出
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${AWS_ACCESS_KEY_ID} ${AWS_SECRET_ACCESS_KEY} &&
+      mc mb -p local/${S3_BUCKET} || true &&
+      echo 'bucket ready: ${S3_BUCKET}'
+      "
+    networks: [backbone]
+    restart: "no"
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  minio_data:
+  translation_work:
+
+networks:
+  backbone:
+    driver: bridge
