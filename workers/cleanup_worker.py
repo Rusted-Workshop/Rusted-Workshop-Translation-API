@@ -5,7 +5,7 @@
 import os
 import shutil
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from services.task_manager import TaskManager
 from models.task import TaskStatus
@@ -52,12 +52,22 @@ class CleanupWorker:
             # 等待下一次检查
             time.sleep(self.check_interval)
 
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _ensure_aware_utc(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
     async def cleanup_old_tasks(self):
         """清理过期的已完成任务"""
-        print(f"[{datetime.now()}] 开始清理过期任务")
+        print(f"[{self._utc_now().isoformat()}] 开始清理过期任务")
 
         # 计算截止时间
-        cutoff_time = datetime.now() - timedelta(days=self.retention_days)
+        cutoff_time = self._utc_now() - timedelta(days=self.retention_days)
 
         # 获取所有任务
         tasks = await self.task_manager.list_tasks(limit=1000)
@@ -69,7 +79,8 @@ class CleanupWorker:
                 continue
 
             # 检查是否过期
-            if task.completed_at and task.completed_at < cutoff_time:
+            completed_at = task.completed_at
+            if completed_at and self._ensure_aware_utc(completed_at) < cutoff_time:
                 print(f"  删除过期任务: {task.task_id} (完成时间: {task.completed_at})")
                 await self.task_manager.delete_task(task.task_id)
                 deleted_count += 1
@@ -81,7 +92,7 @@ class CleanupWorker:
         if not os.path.exists(self.work_dir):
             return
 
-        print(f"[{datetime.now()}] 开始清理孤立文件")
+        print(f"[{self._utc_now().isoformat()}] 开始清理孤立文件")
 
         deleted_count = 0
         cutoff_time = time.time() - (self.retention_days * 24 * 3600)
