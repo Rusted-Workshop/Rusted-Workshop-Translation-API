@@ -29,6 +29,11 @@ class TranslationTask(BaseModel):
     s3_dest_key: str = Field(..., description="S3目标文件键")
     target_language: str = Field(default="zh-CN", description="目标语言")
     translate_style: str = Field(default="auto", description="翻译风格")
+    source_hash: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description="源 .rwmod 文件的 SHA-256 十六进制摘要（用于去重）",
+    )
     status: TaskStatus = Field(default=TaskStatus.PENDING, description="任务状态")
     progress: float = Field(default=0.0, ge=0.0, le=100.0, description="进度百分比")
     total_files: int = Field(default=0, description="总文件数")
@@ -48,6 +53,13 @@ class TaskResponse(BaseModel):
     total_files: int = 0
     processed_files: int = 0
     error_message: Optional[str] = None
+    source_hash: Optional[str] = Field(
+        default=None, description="源 .rwmod 文件 SHA-256 摘要"
+    )
+    reused: bool = Field(
+        default=False,
+        description="True 表示此响应复用了同一 source_hash 的既有任务（去重命中）",
+    )
     download_url: Optional[str] = Field(
         default=None, description="下载链接（任务完成后可用）"
     )

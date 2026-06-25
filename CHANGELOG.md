@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Source-hash based dedup for `POST /v1/tasks`: every upload is fingerprinted with
+  SHA-256 of the raw `.rwmod` bytes; re-submitting the same file returns the
+  existing `task_id` (with `X-Task-Reused: true` header and `reused: true` in
+  the body) instead of starting a duplicate translation. A new
+  `source_hash` column + partial unique index on `translation_tasks` makes the
+  contract race-safe at the DB level. `force=true` form field bypasses the
+  dedup for callers that genuinely need a fresh task.
 - Multi-stage Dockerfiles for all four components (API / Coordinator / File Worker / Cleanup).
 - GitHub Actions workflow that builds & publishes multi-arch (amd64 + arm64) images to GHCR on every `v*.*.*` tag.
 - `docker-compose.prod.yml` ready-to-use deployment manifest pulling images from GHCR.

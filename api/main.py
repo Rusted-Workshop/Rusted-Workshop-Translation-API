@@ -2,12 +2,14 @@
 FastAPI 主应用（V1）
 """
 
+import hashlib
 import os
 import tempfile
 import uuid
 from typing import List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+import asyncpg
+from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from models.task import TaskResponse, TaskStatus, TranslationTask
@@ -63,7 +65,9 @@ def _raise_api_error(
 
 
 def _to_task_response(
-    task: TranslationTask, download_url: str | None = None
+    task: TranslationTask,
+    download_url: str | None = None,
+    reused: bool = False,
 ) -> TaskResponse:
     return TaskResponse(
         task_id=task.task_id,
@@ -72,6 +76,8 @@ def _to_task_response(
         total_files=task.total_files,
         processed_files=task.processed_files,
         error_message=task.error_message,
+        source_hash=task.source_hash,
+        reused=reused,
         download_url=download_url,
         created_at=task.created_at,
         updated_at=task.updated_at,
@@ -102,35 +108,82 @@ def health():
     return {"status": "ok", "service": "translation-api", "version": "v1"}
 
 
+def _parse_force_flag(raw: Optional[str]) -> bool:
+    """Form fields arrive as strings; FastAPI's bool coercion treats any
+    non-empty value as True. Parse explicitly here."""
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+_IN_FLIGHT_STATUSES = {
+    TaskStatus.PREPARING,
+    TaskStatus.TRANSLATING,
+    TaskStatus.FINALIZING,
+}
+
+
 @app.post("/v1/tasks", response_model=TaskResponse, status_code=201)
 async def create_task(
+    response: Response,
     file: UploadFile = File(...),
     target_language: str = Form(default="zh-CN"),
     translate_style: str = Form(default="auto"),
+    force: Optional[str] = Form(default=None),
 ):
     if not file.filename:
         _raise_api_error(400, "INVALID_FILE", "Missing upload file name")
     if not str(file.filename).lower().endswith(".rwmod"):
         _raise_api_error(400, "INVALID_FILE_TYPE", "Only .rwmod files are allowed")
 
+    force_flag = _parse_force_flag(force)
+
+    content = await file.read()
+    if not content:
+        _raise_api_error(400, "EMPTY_FILE", "Uploaded file is empty")
+
+    source_hash = hashlib.sha256(content).hexdigest()
+
+    existing = await task_manager.find_latest_by_hash(source_hash)
+    if existing:
+        if force_flag:
+            if existing.status in _IN_FLIGHT_STATUSES:
+                _raise_api_error(
+                    409,
+                    "TASK_IN_FLIGHT",
+                    "Cannot force-recreate a task that is currently in flight; "
+                    "DELETE the existing task first",
+                    {
+                        "existing_task_id": existing.task_id,
+                        "existing_status": existing.status.value,
+                    },
+                )
+            # Drop the previous task so the new INSERT can claim the hash.
+            await task_manager.delete_task(existing.task_id)
+        else:
+            response.headers["X-Task-Reused"] = "true"
+            response.headers["X-Source-Hash"] = source_hash
+            return _to_task_response(existing, reused=True)
+
     task_id = str(uuid.uuid4())
     s3_source_key = f"{S3_UPLOAD_PREFIX}/{task_id}/source.rwmod"
     s3_dest_key = f"{S3_OUTPUT_PREFIX}/{task_id}/translated.rwmod"
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".rwmod") as tmp_file:
-        content = await file.read()
         tmp_file.write(content)
         tmp_path = tmp_file.name
 
     try:
         await s3_service.upload_file(tmp_path, S3_BUCKET, s3_source_key)
     except Exception as e:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
         _raise_api_error(
             500, "S3_UPLOAD_FAILED", "Failed to upload source file", {"error": str(e)}
         )
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+
+    if os.path.exists(tmp_path):
+        os.unlink(tmp_path)
 
     task = TranslationTask(
         task_id=task_id,
@@ -139,11 +192,25 @@ async def create_task(
         s3_dest_key=s3_dest_key,
         target_language=target_language,
         translate_style=translate_style,
+        source_hash=source_hash,
         status=TaskStatus.PENDING,
     )
 
     try:
         task = await task_manager.create_task(task)
+    except asyncpg.UniqueViolationError:
+        # Race: another request just inserted a task with the same hash
+        # between our find_latest_by_hash check and INSERT. Reuse it.
+        existing = await task_manager.find_latest_by_hash(source_hash)
+        if existing:
+            response.headers["X-Task-Reused"] = "true"
+            response.headers["X-Source-Hash"] = source_hash
+            return _to_task_response(existing, reused=True)
+        _raise_api_error(
+            500,
+            "TASK_CREATE_FAILED",
+            "Failed to create task (hash conflict without fallback)",
+        )
     except Exception as e:
         _raise_api_error(
             500, "TASK_CREATE_FAILED", "Failed to create task", {"error": str(e)}
@@ -161,6 +228,7 @@ async def create_task(
             500, "QUEUE_PUBLISH_FAILED", "Failed to queue task", {"error": str(e)}
         )
 
+    response.headers["X-Source-Hash"] = source_hash
     return _to_task_response(task)
 
 

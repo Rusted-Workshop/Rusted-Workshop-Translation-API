@@ -56,6 +56,7 @@ class TaskManager:
                 s3_dest_key TEXT NOT NULL,
                 target_language VARCHAR(32) NOT NULL DEFAULT 'zh-CN',
                 translate_style VARCHAR(64) NOT NULL DEFAULT 'auto',
+                source_hash CHAR(64) NULL,
                 status VARCHAR(32) NOT NULL,
                 progress DOUBLE PRECISION NOT NULL DEFAULT 0,
                 total_files INT NOT NULL DEFAULT 0,
@@ -65,6 +66,29 @@ class TaskManager:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 completed_at TIMESTAMPTZ NULL
             )
+            """
+        )
+        # 旧库可能没有 source_hash 列，幂等补齐
+        await conn.execute(
+            """
+            ALTER TABLE translation_tasks
+            ADD COLUMN IF NOT EXISTS source_hash CHAR(64) NULL
+            """
+        )
+        # 同一源文件只允许一个任务；通过部分唯一索引覆盖所有 hash 记录，
+        # NULL 行（历史数据）允许多个共存以便平滑迁移
+        await conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_translation_tasks_source_hash
+            ON translation_tasks (source_hash)
+            WHERE source_hash IS NOT NULL
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_translation_tasks_source_hash
+            ON translation_tasks (source_hash)
+            WHERE source_hash IS NOT NULL
             """
         )
         await conn.execute(
@@ -93,6 +117,7 @@ class TaskManager:
             s3_dest_key=row["s3_dest_key"],
             target_language=row["target_language"],
             translate_style=row["translate_style"],
+            source_hash=row["source_hash"],
             status=TaskStatus(row["status"]),
             progress=float(row["progress"]),
             total_files=int(row["total_files"]),
@@ -112,10 +137,10 @@ class TaskManager:
                 """
                 INSERT INTO translation_tasks (
                     task_id, s3_source_url, s3_dest_bucket, s3_dest_key,
-                    target_language, translate_style, status, progress,
-                    total_files, processed_files, error_message
+                    target_language, translate_style, source_hash,
+                    status, progress, total_files, processed_files, error_message
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 ON CONFLICT (task_id)
                 DO UPDATE SET
                     s3_source_url = EXCLUDED.s3_source_url,
@@ -123,6 +148,7 @@ class TaskManager:
                     s3_dest_key = EXCLUDED.s3_dest_key,
                     target_language = EXCLUDED.target_language,
                     translate_style = EXCLUDED.translate_style,
+                    source_hash = EXCLUDED.source_hash,
                     status = EXCLUDED.status,
                     progress = EXCLUDED.progress,
                     total_files = EXCLUDED.total_files,
@@ -137,6 +163,7 @@ class TaskManager:
                 task.s3_dest_key,
                 task.target_language,
                 task.translate_style,
+                task.source_hash,
                 task.status.value,
                 float(task.progress),
                 int(task.total_files),
@@ -145,6 +172,31 @@ class TaskManager:
             )
             if not row:
                 raise RuntimeError("Failed to insert task")
+            return self._row_to_task(row)
+        finally:
+            await conn.close()
+
+    async def find_latest_by_hash(
+        self, source_hash: str
+    ) -> Optional[TranslationTask]:
+        """根据源文件 SHA-256 查找最新任务（用于去重命中）"""
+        if not source_hash:
+            return None
+        conn = await self._connect()
+        try:
+            await self._ensure_schema(conn)
+            row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM translation_tasks
+                WHERE source_hash = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                source_hash,
+            )
+            if not row:
+                return None
             return self._row_to_task(row)
         finally:
             await conn.close()
