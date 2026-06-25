@@ -35,6 +35,8 @@ from services.cache_service import TranslationCache
 from services.rabbitmq_service import get_rabbitmq_service
 from services.s3_service import S3Service, create_archive, extract_archive
 from services.task_manager import TaskManager
+from utils.config import S3_OUTPUT_PREFIX
+from utils.filename import build_output_filename
 
 
 class CoordinatorWorker:
@@ -439,14 +441,25 @@ class CoordinatorWorker:
             print(f"[{task_id}] 等待所有文件翻译完成")
             await self._wait_for_file_tasks(task_id, extract_dir, cache_service)
 
-            # 6. 打包
-            print(f"[{task_id}] 打包文件")
+            # 6. 命名输出文件：<mod-title>-<lang>.rwmod
+            print(f"[{task_id}] 命名输出文件")
             await self.task_manager.update_task(
                 task_id, status=TaskStatus.FINALIZING, progress=90.0
             )
+            output_basename = build_output_filename(
+                extract_dir=extract_dir,
+                target_language=target_language,
+                fallback_name=f"mod-{task_id[:8]}",
+            )
+            output_archive = os.path.join(work_dir, output_basename)
+            # 把翻译后的产物也写到与 task_id 相关的 S3 路径下，但用有意义的名字
+            new_s3_dest_key = f"{S3_OUTPUT_PREFIX}/{task_id}/{output_basename}"
+            await self.task_manager.update_task(
+                task_id, s3_dest_key=new_s3_dest_key
+            )
+            s3_dest_key = new_s3_dest_key
 
             try:
-                output_archive = os.path.join(work_dir, "translated.rwmod")
                 create_archive(extract_dir, output_archive, format="zip")
             except Exception as e:
                 error_msg = f"打包文件失败: {str(e)}"

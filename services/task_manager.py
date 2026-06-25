@@ -248,6 +248,7 @@ class TaskManager:
         total_files: Optional[int] = None,
         processed_files: Optional[int] = None,
         error_message: str | None | object = _UNSET,
+        s3_dest_key: Optional[str] = None,
     ) -> Optional[TranslationTask]:
         """更新任务状态"""
         task_uuid = self._parse_task_id(task_id)
@@ -287,6 +288,9 @@ class TaskManager:
                     if error_message is _UNSET
                     else error_message
                 )
+                new_s3_dest_key = (
+                    s3_dest_key if s3_dest_key is not None else current["s3_dest_key"]
+                )
                 completed_at = current["completed_at"]
 
                 if next_status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
@@ -303,8 +307,9 @@ class TaskManager:
                         total_files = $4,
                         processed_files = $5,
                         error_message = $6,
+                        s3_dest_key = $7,
                         updated_at = NOW(),
-                        completed_at = $7
+                        completed_at = $8
                     WHERE task_id = $1
                     RETURNING *
                     """,
@@ -314,6 +319,7 @@ class TaskManager:
                     new_total_files,
                     new_processed_files,
                     new_error_message,
+                    new_s3_dest_key,
                     completed_at,
                 )
                 if not row:

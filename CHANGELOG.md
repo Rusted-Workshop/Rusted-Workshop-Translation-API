@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unique index on `(source_hash, target_language, translate_style)` makes the
   contract race-safe at the DB level. `force=true` form field bypasses the
   dedup for callers that genuinely need a fresh task.
+- Translated `.rwmod` is now named after the mod's display title (read from
+  `mod-info.txt` inside the .rwmod) plus a short language suffix
+  (`ja`→`jp`, `zh-CN`→`cn`, `ru`→`ru`, …). Filenames are sanitized for
+  cross-platform safety (illegal chars folded to `-`, runs collapsed, NFKC
+  normalize). Falls back to `mod-<task_id[:8]>` when the mod has no
+  `mod-info.txt` title.
 - Multi-stage Dockerfiles for all four components (API / Coordinator / File Worker / Cleanup).
 - GitHub Actions workflow that builds & publishes multi-arch (amd64 + arm64) images to GHCR on every `v*.*.*` tag.
 - `docker-compose.prod.yml` ready-to-use deployment manifest pulling images from GHCR.
