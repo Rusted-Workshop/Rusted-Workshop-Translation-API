@@ -24,7 +24,12 @@ from typing import Dict
 from pika.spec import Basic, BasicProperties
 
 from core.rwmod import RWMod
-from models.file_task import FileTaskStatus, FileTranslationMessage, FileTranslationTask
+from models.file_task import (
+    FileBatchTranslationMessage,
+    FileTaskStatus,
+    FileTranslationMessage,
+    FileTranslationTask,
+)
 from models.task import TaskStatus, TranslationTask
 from services.cache_service import TranslationCache
 from services.rabbitmq_service import get_rabbitmq_service
@@ -360,6 +365,12 @@ class CoordinatorWorker:
             await cache_service.redis.set(task_run_key, run_id, ex=file_status_ttl_seconds)
             print(f"[{task_id}] 当前翻译批次 run_id={run_id}")
 
+            # 批大小：每个 RabbitMQ 消息携带多少个文件；批内所有文件共用一次 LLM 调用
+            file_batch_size = max(
+                1, int(os.getenv("FILE_BATCH_SIZE", "10"))
+            )
+
+            pending_items: list[tuple[str, str]] = []  # (file_id, file_path)
             for inifile in rwmod.unit_datas:
                 file_id = str(uuid.uuid4())
                 # 使用正斜杠路径，跨平台兼容
@@ -382,23 +393,47 @@ class CoordinatorWorker:
                     status_key, FileTaskStatus.PENDING.value, ex=file_status_ttl_seconds
                 )
 
-                # 发送到文件翻译队列
-                file_message = FileTranslationMessage(
-                    task_id=task_id,
-                    file_id=file_id,
-                    file_path=file_path,
-                    work_dir=extract_dir,
-                    translate_style=style,
-                    target_language=target_language,
-                    run_id=run_id,
-                )
+                pending_items.append((file_id, file_path))
+
+            # 按 file_batch_size 分组后批量入队
+            published_batches = 0
+            for chunk_start in range(0, len(pending_items), file_batch_size):
+                chunk = pending_items[chunk_start : chunk_start + file_batch_size]
+                chunk_ids = [fid for fid, _ in chunk]
+                chunk_paths = [fpath for _, fpath in chunk]
+
+                if len(chunk) == 1:
+                    fid, fpath = chunk[0]
+                    file_message = FileTranslationMessage(
+                        task_id=task_id,
+                        file_id=fid,
+                        file_path=fpath,
+                        work_dir=extract_dir,
+                        translate_style=style,
+                        target_language=target_language,
+                        run_id=run_id,
+                    )
+                else:
+                    file_message = FileBatchTranslationMessage(
+                        task_id=task_id,
+                        file_ids=chunk_ids,
+                        file_paths=chunk_paths,
+                        work_dir=extract_dir,
+                        translate_style=style,
+                        target_language=target_language,
+                        run_id=run_id,
+                    )
 
                 self.rabbitmq.publish_message(
                     self.FILE_QUEUE_NAME, file_message.model_dump()
                 )
+                published_batches += 1
 
             self.file_tasks[task_id] = file_tasks
-            print(f"[{task_id}] 已创建 {len(file_tasks)} 个文件翻译子任务")
+            print(
+                f"[{task_id}] 已创建 {len(file_tasks)} 个文件翻译子任务 "
+                f"(batch_size={file_batch_size}, 总批次数={published_batches})"
+            )
 
             # 5. 等待所有文件翻译完成
             print(f"[{task_id}] 等待所有文件翻译完成")

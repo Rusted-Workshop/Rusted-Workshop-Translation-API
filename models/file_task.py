@@ -35,11 +35,23 @@ class FileTranslationTask(BaseModel):
 
 
 class FileTranslationMessage(BaseModel):
-    """文件翻译消息"""
+    """文件翻译消息（单文件模式，向后兼容）"""
 
     task_id: str = Field(..., description="主任务ID")
     file_id: str = Field(..., description="文件唯一ID")
     file_path: str = Field(..., description="文件相对路径")
+    work_dir: str = Field(..., description="工作目录")
+    translate_style: str = Field(..., description="翻译风格")
+    target_language: str = Field(default="中文", description="目标语言")
+    run_id: Optional[str] = Field(default=None, description="协调器运行批次ID")
+
+
+class FileBatchTranslationMessage(BaseModel):
+    """文件批量翻译消息：一次消息携带多个文件，共用一次 LLM 调用"""
+
+    task_id: str = Field(..., description="主任务ID")
+    file_ids: list[str] = Field(..., description="文件唯一ID列表")
+    file_paths: list[str] = Field(..., description="文件相对路径列表")
     work_dir: str = Field(..., description="工作目录")
     translate_style: str = Field(..., description="翻译风格")
     target_language: str = Field(default="中文", description="目标语言")

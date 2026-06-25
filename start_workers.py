@@ -9,6 +9,11 @@ import sys
 import time
 from typing import Dict
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 def spawn_worker(command: list[str]) -> subprocess.Popen:
     """启动单个 worker 进程"""
@@ -47,7 +52,11 @@ def start_workers():
     print("=" * 60)
 
     # 读取配置
-    file_worker_count = int(os.getenv("FILE_WORKER_COUNT", "15"))
+    file_worker_count = int(
+        os.getenv("FILE_WORKER_COUNT")
+        or os.getenv("FILE_WORKER_REPLICAS")
+        or "15"
+    )
 
     max_restarts = int(os.getenv("WORKER_MAX_RESTARTS", "0"))
     restart_delay = float(os.getenv("WORKER_RESTART_DELAY_SECONDS", "3"))

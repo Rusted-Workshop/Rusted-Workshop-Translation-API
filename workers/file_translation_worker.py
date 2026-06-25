@@ -1,17 +1,22 @@
 """
 文件翻译 Worker
 
-专门负责翻译单个文件，接收协调器发送的文件级任务
+专门负责翻译单文件/文件批次，接收协调器发送的消息
 """
 
 import json
 import os
 import traceback
+from typing import Iterable
 
 from pika.spec import Basic, BasicProperties
 
-from core.translate import translate_file_preserve_structure
-from models.file_task import FileTaskStatus, FileTranslationMessage
+from core.translate import translate_file_preserve_structure, translate_files_batch
+from models.file_task import (
+    FileBatchTranslationMessage,
+    FileTaskStatus,
+    FileTranslationMessage,
+)
 from services.cache_service import TranslationCache
 from services.rabbitmq_service import get_rabbitmq_service
 
@@ -53,109 +58,191 @@ class FileTranslationWorker:
         """处理消息"""
         import asyncio
 
-        message_data = {}
+        message_data: dict = {}
         task_id = None
-        file_id = None
+        batch_label = None
 
         try:
             message_data = json.loads(body)
-            message = FileTranslationMessage(**message_data)
 
-            task_id = message.task_id
-            file_id = message.file_id
-            file_path = message.file_path
-
-            # 丢弃旧批次消息，避免重启后继续消费失效的工作目录任务
-            is_stale = asyncio.run(self._is_stale_file_message(message))
-            if is_stale:
-                self.rabbitmq.ack_message(method.delivery_tag)
+            # 区分单文件 / 批量消息
+            if "file_ids" in message_data and "file_paths" in message_data:
+                message = FileBatchTranslationMessage(**message_data)
+                task_id = message.task_id
+                batch_label = f"{len(message.file_ids)} files"
                 print(
-                    f"[{task_id}:{file_id}] 跳过旧批次文件消息: {file_path} "
-                    f"(run_id={message.run_id})"
+                    f"[{task_id}] 收到批量消息: files={len(message.file_paths)} "
+                    f"work_dir={message.work_dir}"
                 )
-                return
 
-            print(f"[{task_id}:{file_id}] 开始翻译文件: {file_path}")
+                is_stale = asyncio.run(self._is_stale_batch_message(message))
+                if is_stale:
+                    self.rabbitmq.ack_message(method.delivery_tag)
+                    print(
+                        f"[{task_id}] 跳过旧批次文件消息 (run_id={message.run_id})"
+                    )
+                    return
 
-            # 使用 asyncio.run() 创建独立的 event loop 并正确清理
-            asyncio.run(self._process_file_async(message))
+                asyncio.run(self._process_batch_async(message))
+                self.rabbitmq.ack_message(method.delivery_tag)
+                print(f"[{task_id}] 批量翻译完成: {batch_label}")
+            else:
+                message = FileTranslationMessage(**message_data)
+                task_id = message.task_id
+                file_id = message.file_id
+                batch_label = f"{file_id}"
+                print(f"[{task_id}:{file_id}] 开始翻译文件: {message.file_path}")
 
-            # 确认消息
-            self.rabbitmq.ack_message(method.delivery_tag)
-            print(f"[{task_id}:{file_id}] 文件翻译完成: {file_path}")
+                is_stale = asyncio.run(self._is_stale_file_message(message))
+                if is_stale:
+                    self.rabbitmq.ack_message(method.delivery_tag)
+                    print(
+                        f"[{task_id}:{file_id}] 跳过旧批次文件消息: {message.file_path} "
+                        f"(run_id={message.run_id})"
+                    )
+                    return
+
+                asyncio.run(self._process_file_async(message))
+                self.rabbitmq.ack_message(method.delivery_tag)
+                print(f"[{task_id}:{file_id}] 文件翻译完成: {message.file_path}")
 
         except Exception as e:
-            print(f"[{task_id}:{file_id}] 翻译文件失败: {e}")
+            print(f"[{task_id}] 翻译失败 ({batch_label}): {e}")
             traceback.print_exc()
 
+            # 批量消息失败时把所有子项标记为 FAILED
+            try:
+                if "file_ids" in message_data:
+                    asyncio.run(
+                        self._mark_batch_failed(message_data, str(e))
+                    )
+            except Exception:
+                pass
+
             # 拒绝消息，不重新入队
-            # 注意：失败状态已在 _process_file_async 的 except 块中更新
             self.rabbitmq.nack_message(method.delivery_tag, requeue=False)
 
-    async def _is_stale_file_message(self, message: FileTranslationMessage) -> bool:
+    async def _mark_batch_failed(self, message_data: dict, error: str) -> None:
+        """将批量消息内的全部子项标记为 FAILED。"""
         cache_service = TranslationCache()
         try:
-            run_key = f"task:{message.task_id}:run_id"
+            task_id = message_data.get("task_id")
+            file_ids: Iterable[str] = message_data.get("file_ids", [])
+            ttl = int(os.getenv("FILE_TASK_STATUS_TTL_SECONDS", "21600"))
+            for fid in file_ids:
+                await cache_service.redis.set(
+                    f"file_task:{task_id}:{fid}:status",
+                    FileTaskStatus.FAILED.value,
+                    ex=ttl,
+                )
+                await cache_service.redis.set(
+                    f"file_task:{task_id}:{fid}:error",
+                    error,
+                    ex=ttl,
+                )
+        finally:
+            await cache_service.redis.aclose()
+
+    async def _is_stale_file_message(self, message: FileTranslationMessage) -> bool:
+        return await self._is_stale_run_id(message.task_id, message.run_id, message.work_dir)
+
+    async def _is_stale_batch_message(self, message: FileBatchTranslationMessage) -> bool:
+        return await self._is_stale_run_id(message.task_id, message.run_id, message.work_dir)
+
+    async def _is_stale_run_id(
+        self, task_id: str, run_id: str | None, work_dir: str
+    ) -> bool:
+        cache_service = TranslationCache()
+        try:
+            run_key = f"task:{task_id}:run_id"
             current_run_id = await cache_service.redis.get(run_key)
             if not current_run_id:
-                # 没有活动 run_id 记录时：
-                # - 若工作目录已不存在，视为历史残留消息，直接丢弃
-                # - 否则不做丢弃判断，继续兼容旧流程
-                if not os.path.exists(message.work_dir):
+                if not os.path.exists(work_dir):
                     return True
                 return False
             if isinstance(current_run_id, bytes):
                 current_run_id = current_run_id.decode("utf-8")
             current_run_id = str(current_run_id).strip()
-            message_run_id = str(message.run_id or "").strip()
+            message_run_id = str(run_id or "").strip()
             return message_run_id != current_run_id
         finally:
             await cache_service.redis.aclose()
 
     async def _process_file_async(self, message: FileTranslationMessage):
-        """
-        异步处理文件翻译（完整流程）
-
-        Args:
-            message: 文件翻译消息
-        """
+        """异步处理单文件翻译。"""
         task_id = message.task_id
         file_id = message.file_id
 
-        # 在当前 event loop 中创建新的 Redis 连接
         cache_service = TranslationCache()
-
         try:
-            # 更新状态为翻译中
             await self._update_file_task_status(
                 task_id, file_id, FileTaskStatus.TRANSLATING, cache_service
             )
-
-            # 执行翻译
             await self._translate_file(message)
-
-            # 更新状态为完成
             await self._update_file_task_status(
                 task_id, file_id, FileTaskStatus.COMPLETED, cache_service
             )
-
         except Exception as e:
-            # 更新状态为失败
             await self._update_file_task_status(
                 task_id, file_id, FileTaskStatus.FAILED, cache_service, str(e)
             )
             raise
         finally:
-            # 关闭 Redis 连接
+            await cache_service.redis.aclose()
+
+    async def _process_batch_async(self, message: FileBatchTranslationMessage):
+        """异步处理文件批次翻译：所有文件共用一次 LLM 调用。"""
+        task_id = message.task_id
+        work_dir = message.work_dir
+        file_ids = list(message.file_ids)
+        file_paths = list(message.file_paths)
+
+        if len(file_ids) != len(file_paths):
+            raise ValueError(
+                f"file_ids/file_paths 数量不匹配: {len(file_ids)} vs {len(file_paths)}"
+            )
+
+        cache_service = TranslationCache()
+        try:
+            # 全部置为翻译中
+            for fid in file_ids:
+                await self._update_file_task_status(
+                    task_id, fid, FileTaskStatus.TRANSLATING, cache_service
+                )
+
+            errors = await translate_files_batch(
+                file_paths=file_paths,
+                work_dir=work_dir,
+                translate_style=message.translate_style,
+                target_language=message.target_language,
+            )
+
+            # 写回结果：成功的 COMPLETED，失败的 FAILED
+            failed_files = {os.path.join(work_dir, p.replace("/", os.sep)): err for p, err in errors.items()}
+            for fid, fpath in zip(file_ids, file_paths):
+                full_path = os.path.join(work_dir, fpath.replace("/", os.sep))
+                if full_path in failed_files:
+                    await self._update_file_task_status(
+                        task_id,
+                        fid,
+                        FileTaskStatus.FAILED,
+                        cache_service,
+                        failed_files[full_path],
+                    )
+                else:
+                    await self._update_file_task_status(
+                        task_id, fid, FileTaskStatus.COMPLETED, cache_service
+                    )
+
+            if errors:
+                # 让上层把第一个错误抛出（与单文件行为一致）
+                first_path, first_err = next(iter(errors.items()))
+                raise RuntimeError(f"batch 翻译部分失败: {first_path}: {first_err}")
+        finally:
             await cache_service.redis.aclose()
 
     async def _translate_file(self, message: FileTranslationMessage):
-        """
-        翻译单个文件
-
-        Args:
-            message: 文件翻译消息
-        """
+        """翻译单个文件"""
         task_id = message.task_id
         file_id = message.file_id
         file_path = message.file_path
@@ -163,19 +250,16 @@ class FileTranslationWorker:
         translate_style = message.translate_style
         target_language = message.target_language
 
-        # 构建完整文件路径（将正斜杠转换为系统路径分隔符）
         file_path_normalized = file_path.replace("/", os.sep)
         full_path = os.path.join(work_dir, file_path_normalized)
 
         print(f"[{task_id}:{file_id}] 完整路径: {full_path}")
 
-        # 检查文件是否存在
         if not os.path.exists(full_path):
             raise FileNotFoundError(
                 f"文件不存在: {full_path}\n工作目录: {work_dir}\n相对路径: {file_path}"
             )
 
-        # 保留原文件结构，仅替换可翻译文本字段
         await translate_file_preserve_structure(
             full_path,
             translate_style=translate_style,
@@ -192,16 +276,6 @@ class FileTranslationWorker:
         cache_service: TranslationCache,
         error_message: str = "",
     ):
-        """
-        更新文件任务状态到 Redis
-
-        Args:
-            task_id: 主任务ID
-            file_id: 文件ID
-            status: 状态
-            cache_service: Redis 缓存服务实例
-            error_message: 错误信息
-        """
         status_key = f"file_task:{task_id}:{file_id}:status"
         status_ttl_seconds = int(os.getenv("FILE_TASK_STATUS_TTL_SECONDS", "21600"))
         await cache_service.redis.set(status_key, status.value, ex=status_ttl_seconds)
@@ -211,6 +285,7 @@ class FileTranslationWorker:
             await cache_service.redis.set(
                 error_key, error_message, ex=status_ttl_seconds
             )
+
 
 if __name__ == "__main__":
     worker = FileTranslationWorker()
