@@ -144,7 +144,13 @@ async def create_task(
 
     source_hash = hashlib.sha256(content).hexdigest()
 
-    existing = await task_manager.find_latest_by_hash(source_hash)
+    source_hash = hashlib.sha256(content).hexdigest()
+
+    existing = await task_manager.find_latest_by_signature(
+        source_hash=source_hash,
+        target_language=target_language,
+        translate_style=translate_style,
+    )
     if existing:
         if force_flag:
             if existing.status in _IN_FLIGHT_STATUSES:
@@ -158,7 +164,7 @@ async def create_task(
                         "existing_status": existing.status.value,
                     },
                 )
-            # Drop the previous task so the new INSERT can claim the hash.
+            # Drop the previous task so the new INSERT can claim the signature.
             await task_manager.delete_task(existing.task_id)
         else:
             response.headers["X-Task-Reused"] = "true"
@@ -199,9 +205,14 @@ async def create_task(
     try:
         task = await task_manager.create_task(task)
     except asyncpg.UniqueViolationError:
-        # Race: another request just inserted a task with the same hash
-        # between our find_latest_by_hash check and INSERT. Reuse it.
-        existing = await task_manager.find_latest_by_hash(source_hash)
+        # Race: another request just inserted a task with the same
+        # (hash, target_language, translate_style) signature between our
+        # find_latest_by_signature check and INSERT. Reuse it.
+        existing = await task_manager.find_latest_by_signature(
+            source_hash=source_hash,
+            target_language=target_language,
+            translate_style=translate_style,
+        )
         if existing:
             response.headers["X-Task-Reused"] = "true"
             response.headers["X-Source-Hash"] = source_hash

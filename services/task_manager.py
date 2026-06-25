@@ -75,12 +75,21 @@ class TaskManager:
             ADD COLUMN IF NOT EXISTS source_hash CHAR(64) NULL
             """
         )
-        # 同一源文件只允许一个任务；通过部分唯一索引覆盖所有 hash 记录，
-        # NULL 行（历史数据）允许多个共存以便平滑迁移
+        # 迁移：先丢弃旧版"仅按 hash 唯一"的索引，避免不同语言的同文件
+        # 被错误合并为同一任务
         await conn.execute(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_translation_tasks_source_hash
-            ON translation_tasks (source_hash)
+            DROP INDEX IF EXISTS uq_translation_tasks_source_hash
+            """
+        )
+        # 去重键 = (source_hash, target_language, translate_style)：
+        # 同一文件 + 同语言 + 同风格 → 同一任务；其他任意一项不同都视为
+        # 不同的翻译请求。部分唯一索引避免对历史 source_hash IS NULL
+        # 行产生不必要的唯一性约束。
+        await conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_translation_tasks_signature
+            ON translation_tasks (source_hash, target_language, translate_style)
             WHERE source_hash IS NOT NULL
             """
         )
@@ -176,10 +185,17 @@ class TaskManager:
         finally:
             await conn.close()
 
-    async def find_latest_by_hash(
-        self, source_hash: str
+    async def find_latest_by_signature(
+        self,
+        source_hash: str,
+        target_language: str,
+        translate_style: str,
     ) -> Optional[TranslationTask]:
-        """根据源文件 SHA-256 查找最新任务（用于去重命中）"""
+        """根据 (源文件 hash, 目标语言, 翻译风格) 三元组查找最新任务。
+
+        三元组相同 → 视为同一翻译请求，返回已有任务（去重命中）。
+        任意一项不同 → 视为不同请求，调用方应创建新任务。
+        """
         if not source_hash:
             return None
         conn = await self._connect()
@@ -190,10 +206,14 @@ class TaskManager:
                 SELECT *
                 FROM translation_tasks
                 WHERE source_hash = $1
+                  AND target_language = $2
+                  AND translate_style = $3
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
                 source_hash,
+                target_language,
+                translate_style,
             )
             if not row:
                 return None
