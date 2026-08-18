@@ -197,10 +197,9 @@ class FileTranslationWorker:
         file_ids = list(message.file_ids)
         file_paths = list(message.file_paths)
 
-        if len(file_ids) != len(file_paths):
-            raise ValueError(
-                f"file_ids/file_paths 数量不匹配: {len(file_ids)} vs {len(file_paths)}"
-            )
+        if not os.path.exists(work_dir):
+            print(f"[{task_id}] work_dir 不存在，跳过失效批次消息: {work_dir}")
+            return
 
         cache_service = TranslationCache()
         try:
@@ -235,9 +234,8 @@ class FileTranslationWorker:
                     )
 
             if errors:
-                # 让上层把第一个错误抛出（与单文件行为一致）
                 first_path, first_err = next(iter(errors.items()))
-                raise RuntimeError(f"batch 翻译部分失败: {first_path}: {first_err}")
+                print(f"[{task_id}] batch 翻译部分文件失败 ({len(errors)} files): {first_path}: {first_err}")
         finally:
             await cache_service.redis.aclose()
 
