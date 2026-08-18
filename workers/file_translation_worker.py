@@ -152,21 +152,9 @@ class FileTranslationWorker:
     async def _is_stale_run_id(
         self, task_id: str, run_id: str | None, work_dir: str
     ) -> bool:
-        cache_service = TranslationCache()
-        try:
-            run_key = f"task:{task_id}:run_id"
-            current_run_id = await cache_service.redis.get(run_key)
-            if not current_run_id:
-                if not os.path.exists(work_dir):
-                    return True
-                return False
-            if isinstance(current_run_id, bytes):
-                current_run_id = current_run_id.decode("utf-8")
-            current_run_id = str(current_run_id).strip()
-            message_run_id = str(run_id or "").strip()
-            return message_run_id != current_run_id
-        finally:
-            await cache_service.redis.aclose()
+        if not os.path.exists(work_dir):
+            return True
+        return False
 
     async def _process_file_async(self, message: FileTranslationMessage):
         """异步处理单文件翻译。"""
