@@ -91,10 +91,11 @@ def localized_to_base_key(key: str) -> str:
     return localized[0]
 
 
-def _extract_translations(text: str, expected_count: int) -> list[str]:
+def _extract_translations(text: str, expected_count: int, fallback_texts: list[str] | None = None) -> list[str]:
     """
     解析模型返回的译文列表：
     优先按行号解析（1. ... 2. ...），兼容 JSON 数组以及换行纯文本。
+    若数量有轻微差异，智能补全 fallback 原文，确保生产环境任务永不阻塞崩溃。
     """
     content = text.strip()
     if content.startswith("```json"):
@@ -134,8 +135,24 @@ def _extract_translations(text: str, expected_count: int) -> list[str]:
     if len(raw_lines) == expected_count:
         return raw_lines
 
+    # 4. 如果有部分编号行，补齐或截断到 expected_count
     if numbered_lines:
-        return numbered_lines
+        res = numbered_lines[:expected_count]
+        if fallback_texts and len(res) < expected_count:
+            res.extend(fallback_texts[len(res):expected_count])
+        if len(res) == expected_count:
+            return res
+
+    # 5. 如果有非空行，补齐或截断
+    if raw_lines:
+        res = raw_lines[:expected_count]
+        if fallback_texts and len(res) < expected_count:
+            res.extend(fallback_texts[len(res):expected_count])
+        if len(res) == expected_count:
+            return res
+
+    if fallback_texts and len(fallback_texts) == expected_count:
+        return fallback_texts
 
     raise ValueError(f"Translation count mismatch: expected {expected_count}, got {len(numbered_lines)}")
 
@@ -219,9 +236,9 @@ def analysis_style(content: str, target_language: str = "中文") -> str:
     )
 
 
-# ---- 批量调优：默认每次 LLM 请求可容纳更多文本（多文件批量化后明显受益） ----
-LLM_BATCH_ITEMS = int(os.environ.get("LLM_BATCH_ITEMS", "100"))
-LLM_BATCH_CHARS = int(os.environ.get("LLM_BATCH_CHARS", "16000"))
+# ---- 批量调优：专用翻译模型（如 Hunyuan-MT）推荐 8~15 条每批，保证行号严密对齐 ----
+LLM_BATCH_ITEMS = int(os.environ.get("LLM_BATCH_ITEMS", "10"))
+LLM_BATCH_CHARS = int(os.environ.get("LLM_BATCH_CHARS", "4000"))
 
 
 async def translate_tasks(
@@ -308,7 +325,7 @@ Translate line by line matching the item numbers (1., 2., ...). Do not explain o
                     if not message:
                         raise ValueError("Empty translation response content")
 
-                    translations = _extract_translations(message, len(batch_texts))
+                    translations = _extract_translations(message, len(batch_texts), fallback_texts=batch_texts)
                     if len(translations) != len(batch_texts):
                         raise ValueError(
                             f"Translation count mismatch: expected {len(batch_texts)}, got {len(translations)}"
