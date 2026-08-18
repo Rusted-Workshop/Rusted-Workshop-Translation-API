@@ -290,8 +290,10 @@ class CoordinatorWorker:
         # 在当前 event loop 中创建新的 Redis 连接
         cache_service = TranslationCache()
 
-        # 创建临时工作目录
-        work_dir = tempfile.mkdtemp(prefix=f"translation_{task_id}_")
+        # 创建临时工作目录（必须在共享的 WORK_DIR 挂载卷内，供所有 file-worker 容器访问）
+        base_work_dir = os.getenv("WORK_DIR", "/tmp/translation_work")
+        os.makedirs(base_work_dir, exist_ok=True)
+        work_dir = tempfile.mkdtemp(prefix=f"translation_{task_id}_", dir=base_work_dir)
 
         try:
             # 1. 下载文件
