@@ -2,6 +2,7 @@
 S3 文件服务
 """
 
+import asyncio
 import os
 import zipfile
 from typing import Optional
@@ -35,44 +36,35 @@ class S3Service:
         )
         self.region_name = region_name
 
+    def _get_boto3_client(self):
+        return boto3.client(
+            "s3",
+            aws_access_key_id=self.aws_access_key_id,
+            aws_secret_access_key=self.aws_secret_access_key,
+            region_name=self.region_name,
+            endpoint_url=self.endpoint_url,
+            config=Config(signature_version="s3v4"),
+        )
+
     async def download_file(self, s3_url: str, local_path: str) -> str:
-        """
-        从S3下载文件
-
-        Args:
-            s3_url: S3 URL (格式: s3://bucket/key 或 https://...)
-            local_path: 本地保存路径
-
-        Returns:
-            本地文件路径
-        """
+        """从S3下载文件"""
         bucket, key = self._parse_s3_url(s3_url)
 
         try:
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            async with self.session.client("s3", endpoint_url=self.endpoint_url) as s3:  # type: ignore
-                await s3.download_file(bucket, key, local_path)
+            s3_client = self._get_boto3_client()
+            await asyncio.to_thread(s3_client.download_file, bucket, key, local_path)
             return local_path
-        except ClientError as e:
+        except Exception as e:
             raise Exception(f"Failed to download from S3: {e}")
 
     async def upload_file(self, local_path: str, bucket: str, key: str) -> str:
-        """
-        上传文件到S3
-
-        Args:
-            local_path: 本地文件路径
-            bucket: S3存储桶名称
-            key: S3对象键
-
-        Returns:
-            S3 URL
-        """
+        """上传文件到S3"""
         try:
-            async with self.session.client("s3", endpoint_url=self.endpoint_url) as s3:  # type: ignore
-                await s3.upload_file(local_path, bucket, key)
+            s3_client = self._get_boto3_client()
+            await asyncio.to_thread(s3_client.upload_file, local_path, bucket, key)
             return f"s3://{bucket}/{key}"
-        except ClientError as e:
+        except Exception as e:
             raise Exception(f"Failed to upload to S3: {e}")
 
     async def upload_directory(self, local_dir: str, bucket: str, prefix: str) -> str:
