@@ -283,19 +283,15 @@ async def translate_tasks(
     if current_batch:
         batches.append(current_batch)
 
-    client = AsyncOpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
+    client = AsyncOpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL, timeout=45.0)
     try:
-        all_translations: list[str] = []
-        last_error: Exception | None = None
+        translate_rules = _build_translate_rules(target_lang_english)
+        system_prompt = _build_system_prompt(target_lang_english)
 
-        for batch_texts in batches:
+        async def _translate_single_batch(batch_texts: list[str]) -> list[str]:
             batch_numbered = "\n".join(
                 [f"{i + 1}. {text}" for i, text in enumerate(batch_texts)]
             )
-
-            translate_rules = _build_translate_rules(target_lang_english)
-            system_prompt = _build_system_prompt(target_lang_english)
-
             prompt = f"""{translate_style}
 Translate the following Rusted Warfare texts into {target_lang_english}.
 {translate_rules}
@@ -325,20 +321,19 @@ Translate line by line matching the item numbers (1., 2., ...). Do not explain o
                     if not message:
                         raise ValueError("Empty translation response content")
 
-                    translations = _extract_translations(message, len(batch_texts), fallback_texts=batch_texts)
-                    if len(translations) != len(batch_texts):
-                        raise ValueError(
-                            f"Translation count mismatch: expected {len(batch_texts)}, got {len(translations)}"
-                        )
-
-                    all_translations.extend(translations)
-                    break
+                    return _extract_translations(message, len(batch_texts), fallback_texts=batch_texts)
                 except Exception as e:
-                    last_error = e
                     if attempt < max_retries - 1:
                         await asyncio.sleep(retry_delay)
                     else:
-                        print(f"LLM translation failed after retries: {e}")
+                        print(f"LLM translation batch failed after retries: {e}")
+                        return batch_texts
+            return batch_texts
+
+        batch_results = await asyncio.gather(*[_translate_single_batch(b) for b in batches])
+        all_translations = []
+        for res in batch_results:
+            all_translations.extend(res)
 
         if len(all_translations) == len(original_texts):
             return {
@@ -348,9 +343,6 @@ Translate line by line matching the item numbers (1., 2., ...). Do not explain o
     finally:
         await client.close()
 
-    # 回退：失败时保留原文，确保流水线可完成并暴露错误日志
-    if last_error is not None:
-        print(f"translate_tasks 全量失败，回退原文: {last_error}")
     return {text: text for text in original_texts}
 
 
