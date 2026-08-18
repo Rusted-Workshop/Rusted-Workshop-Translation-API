@@ -91,19 +91,53 @@ def localized_to_base_key(key: str) -> str:
     return localized[0]
 
 
-def _extract_json_array(text: str) -> list[str]:
+def _extract_translations(text: str, expected_count: int) -> list[str]:
+    """
+    解析模型返回的译文列表：
+    优先按行号解析（1. ... 2. ...），兼容 JSON 数组以及换行纯文本。
+    """
     content = text.strip()
-    if content.startswith("```"):
+    if content.startswith("```json"):
+        content = content[7:]
+    elif content.startswith("```"):
         first_newline = content.find("\n")
         if first_newline != -1:
             content = content[first_newline + 1:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-    parsed = json.loads(content)
-    if not isinstance(parsed, list):
-        raise ValueError(f"Expected list, got {type(parsed)}")
-    return [str(item) for item in parsed]
+    if content.endswith("```"):
+        content = content[:-3]
+    content = content.strip()
+
+    # 1. 尝试按编号行提取（1. ... 2. ...）
+    numbered_lines = []
+    lines = content.split("\n")
+    for line in lines:
+        l = line.strip()
+        if not l:
+            continue
+        m = re.match(r"^\s*(\d+)[\.\、\:\s\-\)]+\s*(.*)$", l)
+        if m:
+            numbered_lines.append(m.group(2).strip())
+
+    if len(numbered_lines) == expected_count:
+        return numbered_lines
+
+    # 2. 尝试 JSON 数组解析
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, list) and len(parsed) == expected_count:
+            return [str(item) for item in parsed]
+    except Exception:
+        pass
+
+    # 3. 尝试按纯非空行数量匹配
+    raw_lines = [l.strip() for l in lines if l.strip()]
+    if len(raw_lines) == expected_count:
+        return raw_lines
+
+    if numbered_lines:
+        return numbered_lines
+
+    raise ValueError(f"Translation count mismatch: expected {expected_count}, got {len(numbered_lines)}")
 
 
 def _sanitize_single_line_value(value: str) -> str:
@@ -158,11 +192,11 @@ def _build_translate_rules(target_lang_english: str) -> str:
 
 
 def _build_system_prompt(target_lang_english: str) -> str:
-    """构建 system prompt（英文，避免中文偏见）。"""
+    """构建 system prompt（适用于专用翻译模型和通用 LLM）。"""
     return (
-        f"You are a professional Rusted Warfare mod unit translation assistant. "
-        f"You strictly output a JSON array of translated strings in {target_lang_english}. "
-        f"Preserve all placeholders and variable references exactly; variable names are case-sensitive and must not be altered."
+        f"You are a professional Rusted Warfare mod unit localization translator. "
+        f"Translate each numbered line into {target_lang_english}, keeping the exact numbers and line order. "
+        f"Preserve all variables, formulas, tags, and formatting intact. Output translated lines directly."
     )
 
 
@@ -246,25 +280,20 @@ async def translate_tasks(
             system_prompt = _build_system_prompt(target_lang_english)
 
             prompt = f"""{translate_style}
-You are a Rusted Warfare mod unit translation expert.
-Target language: {target_lang_english}
-
+Translate the following Rusted Warfare texts into {target_lang_english}.
 {translate_rules}
 
-Translate the following texts in order (maintain item order, do not explain):
+Input texts to translate:
 {batch_numbered}
 
-Return requirements:
-1. Return ONLY a JSON array
-2. Array length must equal {len(batch_texts)}
-3. Do not return any extra text
-"""
+Instructions:
+Translate line by line matching the item numbers (1., 2., ...). Do not explain or add extra text."""
 
             for attempt in range(max_retries):
                 try:
                     response = await client.chat.completions.create(
                         model=AI_MODEL,
-                        temperature=0.2,
+                        temperature=0.1,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": prompt},
@@ -279,7 +308,7 @@ Return requirements:
                     if not message:
                         raise ValueError("Empty translation response content")
 
-                    translations = _extract_json_array(message)
+                    translations = _extract_translations(message, len(batch_texts))
                     if len(translations) != len(batch_texts):
                         raise ValueError(
                             f"Translation count mismatch: expected {len(batch_texts)}, got {len(translations)}"
