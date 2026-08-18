@@ -530,7 +530,7 @@ class CoordinatorWorker:
             check_interval, float(os.getenv("FILE_TASK_TIMEOUT_SECONDS", "1800"))
         )
         stall_timeout_seconds = max(
-            check_interval, float(os.getenv("FILE_TASK_STALL_TIMEOUT_SECONDS", "180"))
+            check_interval, float(os.getenv("FILE_TASK_STALL_TIMEOUT_SECONDS", "600"))
         )
         status_log_interval = max(
             check_interval,
